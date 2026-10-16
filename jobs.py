@@ -31,6 +31,7 @@ from .memory import (
 )
 from .settings import Settings
 from .store import Store
+from .talk import TALK_LOG_KEEP_DAYS
 
 # call(system_prompt, prompt) -> the model's text, None on any failure
 ModelCall = Callable[[str, str], Awaitable[str | None]]
@@ -167,6 +168,7 @@ def prune(store: Store, s: Settings, today: datetime.date, now: float) -> None:
         )
     store.delete_emotions_before(now - 3 * 86400)
     store.delete_news_before(now - NEWS_KEEP_DAYS * 86400)
+    store.delete_talk_log_before(now - TALK_LOG_KEEP_DAYS * 86400)
     if s.person_keep_days > 0:
         for user_id in store.quiet_people(now - s.person_keep_days * 86400):
             store.forget_person(user_id)

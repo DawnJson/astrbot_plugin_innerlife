@@ -88,6 +88,30 @@ CREATE TABLE IF NOT EXISTS tool_usage (
 CREATE TABLE IF NOT EXISTS disabled_groups (
   group_id TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS talk (
+  group_id TEXT PRIMARY KEY,
+  bias REAL NOT NULL,
+  her REAL NOT NULL,
+  total REAL NOT NULL,
+  heat REAL NOT NULL,
+  urge REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS talk_log (
+  at REAL NOT NULL,
+  group_id TEXT NOT NULL,
+  kind TEXT NOT NULL,                       -- chat / topic
+  p REAL,
+  outcome TEXT NOT NULL,                    -- skip / PASS / CHAT / ASK / fuse / busy / fail / sent
+  features TEXT NOT NULL                    -- JSON
+);
+CREATE TABLE IF NOT EXISTS model_calls (
+  group_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  hour TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY (group_id, hour)
+);
 CREATE INDEX IF NOT EXISTS memories_user ON memories (user_id);
 CREATE INDEX IF NOT EXISTS emotions_created ON emotions (created_at);
 CREATE INDEX IF NOT EXISTS chat_log_at ON chat_log (at);
@@ -368,3 +392,52 @@ class Store:
                     "INSERT OR IGNORE INTO disabled_groups (group_id) VALUES (?)", (group_id,)
                 )
             return cursor.rowcount > 0
+
+    # talk state, decision log and call fuse
+    def talk(self, group_id: str) -> sqlite3.Row | None:
+        return self._one("SELECT * FROM talk WHERE group_id=?", (group_id,))
+
+    def save_talk(
+        self, group_id: str, bias: float, her: float, total: float, heat: float, urge: float, now: float
+    ) -> None:
+        self._run(
+            "INSERT INTO talk (group_id,bias,her,total,heat,urge,updated_at) VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(group_id) DO UPDATE SET bias=excluded.bias, her=excluded.her,"
+            " total=excluded.total, heat=excluded.heat, urge=excluded.urge,"
+            " updated_at=excluded.updated_at",
+            (group_id, bias, her, total, heat, urge, now),
+        )
+
+    def log_talk(
+        self, now: float, group_id: str, kind: str, p: float | None, outcome: str, features: str
+    ) -> None:
+        self._run(
+            "INSERT INTO talk_log (at,group_id,kind,p,outcome,features) VALUES (?,?,?,?,?,?)",
+            (now, group_id, kind, p, outcome, features),
+        )
+
+    def talk_log(self) -> list[sqlite3.Row]:
+        return self._all("SELECT * FROM talk_log ORDER BY at")
+
+    def delete_talk_log_before(self, before: float) -> None:
+        self._run("DELETE FROM talk_log WHERE at<?", (before,))
+
+    def calls(self, group_id: str, day: str, hour: str) -> tuple[int, int]:
+        """Model calls this group made today and in this hour."""
+        row = self._one(
+            "SELECT COALESCE(SUM(count),0) AS day_count,"
+            " COALESCE(SUM(CASE WHEN hour=? THEN count ELSE 0 END),0) AS hour_count"
+            " FROM model_calls WHERE group_id=? AND day=?",
+            (hour, group_id, day),
+        )
+        return row["day_count"], row["hour_count"]
+
+    def add_call(self, group_id: str, day: str, hour: str) -> None:
+        """Count one call; earlier days are dropped."""
+        with self._db() as db:
+            db.execute("DELETE FROM model_calls WHERE day<?", (day,))
+            db.execute(
+                "INSERT INTO model_calls (group_id,day,hour,count) VALUES (?,?,?,1)"
+                " ON CONFLICT(group_id,hour) DO UPDATE SET count=count+1",
+                (group_id, day, hour),
+            )

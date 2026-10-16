@@ -5,6 +5,8 @@ import base64
 import dataclasses
 import datetime
 import inspect
+import json
+import math
 import os
 import sqlite3
 import tempfile
@@ -196,8 +198,11 @@ async def run_request(instance: Main, event: FakeEvent, request: ProviderRequest
     await instance.apply_persona(event, request)
 
 
-def stateful(directory: str, **overrides) -> Main:
+def stateful(directory: str, roll: float | None = None, **overrides) -> Main:
+    """A Main on a throwaway db; `roll` fixes every dice roll (0 always speaks, 1 never does)."""
     instance = make_main(**overrides)
+    if roll is not None:
+        instance._roll = lambda: roll
     Path(directory).mkdir(parents=True, exist_ok=True)
     instance._init_store(Path(directory))
     main_module.typing_delay = lambda *args: 0.0
@@ -625,170 +630,184 @@ async def test_response_finalize_and_slot_release() -> None:
 
 
 async def test_decorated_result_at_rule() -> None:
-    os.environ[SECRET_ENV] = SECRET
-    instance = make_main()
-    chat = instance._proactive_chat
+    with tempfile.TemporaryDirectory() as directory:
+        os.environ[SECRET_ENV] = SECRET
+        instance = stateful(directory, roll=1.0)
+        chat = instance._proactive_chat
 
-    async def answer(*, later_member_message: bool, model: bool = True):
-        group = FakeEvent("问题", sender_id="asker")
-        await instance.handle_group_chatter(group)
-        if later_member_message:
-            chat.record(
-                GROUP_ID, "别人", "别人插话", time.monotonic(), sender_id="other", awaits_verdict=False
-            )
-        text = f"回答 {SECRET}"
-        group.set_result(model_result(text) if model else MessageEventResult().message(text))
-        await instance.secure_decorated_result(group)
-        return group.get_result()
+        async def answer(*, later_member_message: bool, model: bool = True):
+            group = FakeEvent("问题", sender_id="asker")
+            await instance.handle_group_chatter(group)
+            if later_member_message:
+                chat.record(
+                    GROUP_ID, "别人", "别人插话", time.monotonic(), sender_id="other", awaits_verdict=False
+                )
+            text = f"回答 {SECRET}"
+            group.set_result(model_result(text) if model else MessageEventResult().message(text))
+            await instance.secure_decorated_result(group)
+            return group.get_result()
 
-    quiet = await answer(later_member_message=False)
-    assert plain_texts(quiet) == ["回答 [敏感信息已隐藏]"] and len(quiet.chain) == 1
+        quiet = await answer(later_member_message=False)
+        assert plain_texts(quiet) == ["回答 [敏感信息已隐藏]"] and len(quiet.chain) == 1
 
-    interrupted = await answer(later_member_message=True)
-    assert isinstance(interrupted.chain[0], main_module.At)
-    assert str(interrupted.chain[0].qq) == "asker"
-    assert plain_texts(interrupted)[0] == " "
-    assert SECRET not in "".join(plain_texts(interrupted))
+        interrupted = await answer(later_member_message=True)
+        assert isinstance(interrupted.chain[0], main_module.At)
+        assert str(interrupted.chain[0].qq) == "asker"
+        assert plain_texts(interrupted)[0] == " "
+        assert SECRET not in "".join(plain_texts(interrupted))
 
-    command_reply = await answer(later_member_message=True, model=False)
-    assert plain_texts(command_reply) == [f"回答 {SECRET}"] and len(command_reply.chain) == 1
+        command_reply = await answer(later_member_message=True, model=False)
+        assert plain_texts(command_reply) == [f"回答 {SECRET}"] and len(command_reply.chain) == 1
 
-    reply_event = FakeEvent("问题", sender_id="asker")
-    await instance.handle_group_chatter(reply_event)
-    chat.record(GROUP_ID, "别人", "插话", time.monotonic(), sender_id="other", awaits_verdict=False)
-    quoted = model_result("带引用")
-    quoted.chain.insert(0, main_module.Reply(id="1", chain=[]))
-    reply_event.set_result(quoted)
-    await instance.secure_decorated_result(reply_event)
-    assert not any(isinstance(c, main_module.At) for c in quoted.chain)
+        reply_event = FakeEvent("问题", sender_id="asker")
+        await instance.handle_group_chatter(reply_event)
+        chat.record(GROUP_ID, "别人", "插话", time.monotonic(), sender_id="other", awaits_verdict=False)
+        quoted = model_result("带引用")
+        quoted.chain.insert(0, main_module.Reply(id="1", chain=[]))
+        reply_event.set_result(quoted)
+        await instance.secure_decorated_result(reply_event)
+        assert not any(isinstance(c, main_module.At) for c in quoted.chain)
 
-    merged = FakeEvent("问题", sender_id="asker")
-    parts = model_result("第一段。")
-    parts.chain.append(main_module.Plain("第二段"))
-    merged.set_result(parts)
-    await instance.secure_decorated_result(merged)
-    assert plain_texts(parts) == ["第一段。 第二段"]
-    last = chat.last_message(GROUP_ID)
-    assert last.speaker == main_module.SELF_SPEAKER and last.text == "第一段。 第二段", last
+        merged = FakeEvent("问题", sender_id="asker")
+        parts = model_result("第一段。")
+        parts.chain.append(main_module.Plain("第二段"))
+        merged.set_result(parts)
+        await instance.secure_decorated_result(merged)
+        assert plain_texts(parts) == ["第一段。 第二段"]
+        last = chat.last_message(GROUP_ID)
+        assert last.speaker == main_module.SELF_SPEAKER and last.text == "第一段。 第二段", last
 
-    held = FakeEvent()
-    await run_request(instance, held, ProviderRequest(prompt="问题"))
-    held.set_result(model_result("好"))
-    await instance.secure_decorated_result(held)
-    assert not held.get_extra(main_module._SLOT_HELD_KEY)
-    assert _CHAT_ENTRY_KEY not in held.extra
-    print("PASS policy: model replies are finalised, recorded, and @ the asker after an interjection")
+        held = FakeEvent()
+        await run_request(instance, held, ProviderRequest(prompt="问题"))
+        held.set_result(model_result("好"))
+        await instance.secure_decorated_result(held)
+        assert not held.get_extra(main_module._SLOT_HELD_KEY)
+        assert _CHAT_ENTRY_KEY not in held.extra
+        print("PASS policy: model replies are finalised, recorded, and @ the asker after an interjection")
 
 
 async def test_chatter_judgement() -> None:
-    instance = make_main()
-    prompts: list[tuple[str, str]] = []
-    answers: list[str | None] = []
+    with tempfile.TemporaryDirectory() as directory:
+        instance = stateful(directory + "/main", roll=0.0)
+        prompts: list[tuple[str, str]] = []
+        answers: list[str | None] = []
 
-    async def fake_call(system_prompt: str, prompt: str, **_):
-        prompts.append((system_prompt, prompt))
-        return answers.pop(0)
+        async def fake_call(system_prompt: str, prompt: str, **_):
+            prompts.append((system_prompt, prompt))
+            return answers.pop(0)
 
-    instance._model_call = fake_call
+        instance._model_call = fake_call
 
-    groups = iter(range(100, 200))
+        groups = iter(range(100, 200))
 
-    async def judged(answer: str | None, texts: list[str]):
-        answers.append(answer)
-        group = str(next(groups))
-        event = FakeEvent(texts[-1], messages=[])
-        entries = [
-            instance._proactive_chat.record(
-                group, "甲", text, time.monotonic(), sender_id="1", awaits_verdict=True
-            )
-            for text in texts
-        ]
-        await instance._judge_chatter(event, group)
-        return event, entries
+        async def judged(answer: str | None, texts: list[str]):
+            answers.append(answer)
+            group = str(next(groups))
+            event = FakeEvent(texts[-1], messages=[])
+            entries = [
+                instance._proactive_chat.record(
+                    group, "甲", text, time.monotonic(), sender_id="1", awaits_verdict=True
+                )
+                for text in texts
+            ]
+            await instance._judge_chatter(event, group)
+            return event, entries
 
-    event, _ = await judged("哈哈 https://other.test/x", ["今天好热"])
-    assert [text for text in event.sent_text()] == ["哈哈 链接已隐藏"]
-    system_prompt, prompt = prompts[-1]
-    assert system_prompt.startswith(instance.safety_prompt + "\n\n测试人设\n\n")
-    assert "ASK 编号：有群友在问 测试范围相关的问题" in system_prompt
-    assert prompt.startswith("你此刻的状态：") and "群友也会叫你：小测\n" in prompt
-    assert prompt.endswith("1. 甲：今天好热")
+        event, _ = await judged("哈哈 https://other.test/x", ["今天好热"])
+        assert [text for text in event.sent_text()] == ["哈哈 链接已隐藏"]
+        system_prompt, prompt = prompts[-1]
+        assert system_prompt.startswith(instance.safety_prompt + "\n\n测试人设\n\n")
+        assert "ASK 编号：有群友在问 测试范围相关的问题" in system_prompt
+        assert prompt.startswith("你此刻的状态：") and "群友也会叫你：小测\n" in prompt
+        assert prompt.endswith("1. 甲：今天好热")
 
-    event, entries = await judged("PASS", ["随便聊聊"])
-    assert event.sent == [] and await entries[0].verdict is None
+        event, entries = await judged("PASS", ["随便聊聊"])
+        assert event.sent == [] and await entries[0].verdict is None
 
-    event, entries = await judged("ASK 1", ["这个怎么配置"])
-    assert event.sent == [] and await entries[0].verdict == ASK
+        event, entries = await judged("ASK 1", ["这个怎么配置"])
+        assert event.sent == [] and await entries[0].verdict == ASK
 
-    event, entries = await judged("哈哈", ["第一句", "第二句"])
-    assert event.sent_text() == ["哈哈"]
+        event, entries = await judged("哈哈", ["第一句", "第二句"])
+        assert event.sent_text() == ["哈哈"]
 
-    quiet = make_main(support_scope="", bot_names=[])
-    quiet_prompts: list[str] = []
+        quiet = stateful(directory + "/quiet", roll=0.0, support_scope="", bot_names=[])
+        quiet_prompts: list[str] = []
 
-    async def quiet_call(system_prompt: str, prompt: str, **_):
-        quiet_prompts.append(prompt)
-        return "ASK 1"
+        async def quiet_call(system_prompt: str, prompt: str, **_):
+            quiet_prompts.append(prompt)
+            return "ASK 1"
 
-    quiet._model_call = quiet_call
-    entry = quiet._proactive_chat.record(
-        GROUP_ID, "甲", "怎么配置", time.monotonic(), sender_id="1", awaits_verdict=True
-    )
-    quiet_event = FakeEvent("怎么配置", messages=[])
-    await quiet._judge_chatter(quiet_event, GROUP_ID)
-    assert quiet_event.sent == [] and await entry.verdict is None
-    assert "ASK" not in quiet.proactive_system_prompt
-    assert "群友也会叫你" not in quiet_prompts[0]
-    print("PASS policy: chatter judgement sends lines, resolves ASK, honours support_scope")
+        quiet._model_call = quiet_call
+        entry = quiet._proactive_chat.record(
+            GROUP_ID, "甲", "怎么配置", time.monotonic(), sender_id="1", awaits_verdict=True
+        )
+        quiet_event = FakeEvent("怎么配置", messages=[])
+        await quiet._judge_chatter(quiet_event, GROUP_ID)
+        assert quiet_event.sent == [] and await entry.verdict is None
+        assert "ASK" not in quiet.proactive_system_prompt
+        assert "群友也会叫你" not in quiet_prompts[0]
+        print("PASS policy: chatter judgement sends lines, resolves ASK, honours support_scope")
 
 
 async def test_chatter_wakes_the_model_for_an_open_question() -> None:
-    instance = make_main()
-    module = main_module
-    saved = module.QUIET_SECONDS, module.ASK_WAIT_ALONE_SECONDS, module.ASK_WAIT_SECONDS
-    module.QUIET_SECONDS = 0
-    module.ASK_WAIT_ALONE_SECONDS = 0
-    module.ASK_WAIT_SECONDS = 0
-    try:
-        calls: list[str] = []
+    with tempfile.TemporaryDirectory() as directory:
+        instance = stateful(directory + "/main", roll=0.0)
+        module = main_module
+        saved = module.QUIET_SECONDS, module.ASK_WAIT_ALONE_SECONDS, module.ASK_WAIT_SECONDS
+        module.QUIET_SECONDS = 0
+        module.ASK_WAIT_ALONE_SECONDS = 0
+        module.ASK_WAIT_SECONDS = 0
+        try:
+            calls: list[str] = []
 
-        async def fake_call(system_prompt: str, prompt: str, **_):
-            calls.append(system_prompt)
-            return "OPEN" if system_prompt == module.ANSWERED_CHECK_PROMPT else "ASK 1"
+            async def fake_call(system_prompt: str, prompt: str, **_):
+                calls.append(system_prompt)
+                return "OPEN" if system_prompt == module.ANSWERED_CHECK_PROMPT else "ASK 1"
 
-        instance._model_call = fake_call
-        asking = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")], sender_id="asker")
-        await instance.handle_group_chatter(asking)
-        assert asking.get_extra(_PROACTIVE_ANSWER_KEY) is True
-        assert asking.is_at_or_wake_command
+            instance._model_call = fake_call
+            asking = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")], sender_id="asker")
+            await instance.handle_group_chatter(asking)
+            assert asking.get_extra(_PROACTIVE_ANSWER_KEY) is True
+            assert asking.is_at_or_wake_command
 
-        mentioned = FakeEvent("@她 在吗")
-        before = len(calls)
-        await instance.handle_group_chatter(mentioned)
-        assert len(calls) == before and not mentioned.get_extra(_PROACTIVE_ANSWER_KEY)
+            mentioned = FakeEvent("@她 在吗")
+            before = len(calls)
+            await instance.handle_group_chatter(mentioned)
+            assert len(calls) == before and not mentioned.get_extra(_PROACTIVE_ANSWER_KEY)
 
-        command = FakeEvent("/其他命令 参数", messages=[main_module.Plain("/其他命令 参数")])
-        await instance.handle_group_chatter(command)
-        assert len(calls) == before
+            command = FakeEvent("/其他命令 参数", messages=[main_module.Plain("/其他命令 参数")])
+            await instance.handle_group_chatter(command)
+            assert len(calls) == before
 
-        with tempfile.TemporaryDirectory() as directory:
-            disabled = stateful(directory)
+            disabled = stateful(directory + "/off", roll=0.0)
             disabled.store.set_group_enabled(GROUP_ID, False)
             disabled._model_call = fake_call
             off = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
             await disabled.handle_group_chatter(off)
             assert not off.get_extra(_PROACTIVE_ANSWER_KEY)
             assert len(calls) == before
+            # The judgement, the "still open" check and the answer each count towards the fuse.
+            assert instance.store.calls(GROUP_ID, *instance._call_buckets())[0] == 3
 
-        # chatter_daily_limit 0: she only answers @s, never looks at the chatter.
-        mute = make_main(chatter_daily_limit=0)
-        mute._model_call = fake_call
-        silent = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
-        await asyncio.wait_for(mute.handle_group_chatter(silent), 1)
-        assert len(calls) == before and not silent.get_extra(_PROACTIVE_ANSWER_KEY)
-    finally:
-        module.QUIET_SECONDS, module.ASK_WAIT_ALONE_SECONDS, module.ASK_WAIT_SECONDS = saved
-    print("PASS policy: an unanswered ASK wakes the model; @, commands, a closed switch and limit 0 do not")
+            # A fuse of 2 allows the judgement and the check but not the answer itself.
+            tight = stateful(directory + "/tight", roll=0.0, daily_call_fuse=2)
+            tight._model_call = fake_call
+            tight_event = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
+            await tight.handle_group_chatter(tight_event)
+            assert not tight_event.get_extra(_PROACTIVE_ANSWER_KEY)
+            assert tight.store.calls(GROUP_ID, *tight._call_buckets())[0] == 2
+
+            # daily_call_fuse 0: she only answers @s, never looks at the chatter.
+            mute = stateful(directory + "/mute", roll=0.0, daily_call_fuse=0)
+            mute._model_call = fake_call
+            before = len(calls)
+            silent = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
+            await asyncio.wait_for(mute.handle_group_chatter(silent), 1)
+            assert len(calls) == before and not silent.get_extra(_PROACTIVE_ANSWER_KEY)
+            assert mute.store.talk_log() == []
+        finally:
+            module.QUIET_SECONDS, module.ASK_WAIT_ALONE_SECONDS, module.ASK_WAIT_SECONDS = saved
+        print("PASS policy: an unanswered ASK wakes the model; @, commands, a closed switch and a spent fuse do not")
 
 
 class FakeGate:
@@ -1109,7 +1128,7 @@ async def test_judge_sees_images_and_bursts() -> None:
                 return self.file
 
         for vision in (True, False):
-            instance = stateful(directory + f"/{vision}", max_images=2, vision=vision)
+            instance = stateful(directory + f"/{vision}", roll=0.0, max_images=2, vision=vision)
             seen: dict = {}
 
             async def fake_call(system_prompt: str, prompt: str, image_urls=None):
@@ -1183,7 +1202,8 @@ async def test_insult_signal_and_bot_notes() -> None:
 
 async def test_topic_starter() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        instance = stateful(directory, proactive_daily_cap=1)
+        instance = stateful(directory, roll=0.0)
+        instance.store.save_talk(GROUP_ID, -3.0, 0.0, 0.0, 0.0, 0.8, time.time())
         sent: list[tuple[str, object]] = []
 
         async def send_message(umo, chain):
@@ -1222,16 +1242,20 @@ async def test_topic_starter() -> None:
         assert instance.mind.active_emotions(time.time())[0][0] == "无语"
         assert GROUP_ID in instance._unprompted
 
-        # Gap and daily cap hold her back without a model call.
-        await instance._topic(GROUP_ID)
-        instance._topic_tried_at.clear()
+        # The urge drops to three tenths after a topic went out, and a missed roll costs no call.
+        urge = instance.store.talk(GROUP_ID)["urge"]
+        assert abs(urge - 0.8 * main_module.TOPIC_SENT_URGE) < 0.01, urge
+        assert [r["outcome"] for r in instance.store.talk_log()] == ["sent"]
+        instance.store.save_talk(GROUP_ID, -3.0, 0.0, 0.0, 0.0, 0.5, time.time())
+        instance._roll = lambda: 0.5  # above p = 0.0127 * 0.25 * B
         await instance._topic(GROUP_ID)
         assert len(prompts) == 1 and len(sent) == 2
 
-        # PASS sends nothing; a busy group, a closed switch and tired energy never reach the model.
-        other = stateful(directory + "/b")
+        # PASS sends nothing and the urge only falls to six tenths.
+        other = stateful(directory + "/b", roll=0.0)
         other.context = SimpleNamespace(send_message=send_message)
         other._umo[GROUP_ID] = "umo-2"
+        other.store.save_talk(GROUP_ID, -3.0, 0.0, 0.0, 0.0, 0.5, time.time())
         other_chat = other._proactive_chat
         other_chat.record(
             GROUP_ID, "甲", "排障中", time.monotonic() - 3600, sender_id="1", awaits_verdict=False
@@ -1239,17 +1263,36 @@ async def test_topic_starter() -> None:
         other_chat.energy = 90.0
         other._model_call = call
         await other._topic(GROUP_ID)
-        assert len(prompts) == 2 and len(sent) == 2 and GROUP_ID in other._topic_tried_at
-        other._topic_tried_at.clear()
+        assert len(prompts) == 2 and len(sent) == 2
+        assert abs(other.store.talk(GROUP_ID)["urge"] - 0.5 * main_module.TOPIC_MISS_URGE) < 0.01
+        assert [r["outcome"] for r in other.store.talk_log()] == ["PASS"]
+
+        # A recent member message, a closed switch and a spent fuse never reach the model.
+        other.store.save_talk(GROUP_ID, -3.0, 0.0, 0.0, 0.0, 1.0, time.time())
         other_chat.record(
             GROUP_ID, "甲", "刚说话", time.monotonic() - 60, sender_id="1", awaits_verdict=False
         )
         await other._topic(GROUP_ID)
-        other_chat.energy = 5.0
+        other_chat.record(
+            GROUP_ID, "甲", "很久前", time.monotonic() - 3600, sender_id="1", awaits_verdict=False
+        )
         other.store.set_group_enabled(GROUP_ID, False)
         await other._topic(GROUP_ID)
+        other.store.set_group_enabled(GROUP_ID, True)
+        for _ in range(main_module.HOURLY_CALL_FUSE):
+            other._count_call(GROUP_ID)
+        await other._topic(GROUP_ID)
         assert len(prompts) == 2
-    print("PASS policy: proactive topics respect quiet, caps, gap, energy and the switch; the model decides PASS")
+
+        # The urge grows while she is awake and stands still while she sleeps.
+        grow = stateful(directory + "/g")
+        grow.store.save_talk(GROUP_ID, -3.0, 0.0, 0.0, 0.0, 0.0, time.time() - 3600)
+        grow.upkeep.asleep = lambda dt: True
+        assert grow._talk_state(GROUP_ID).urge == 0.0
+        grow.store.save_talk(GROUP_ID, -3.0, 0.0, 0.0, 0.0, 0.0, time.time() - 3600)
+        grow.upkeep.asleep = lambda dt: False
+        assert abs(grow._talk_state(GROUP_ID).urge - (1 - math.exp(-3600 / (4 * 3600)))) < 0.01
+    print("PASS policy: topics roll on the urge, which falls after an attempt; quiet, switch and fuse hold her back")
 
 
 async def test_topics_wait_while_she_sleeps() -> None:
@@ -1425,6 +1468,101 @@ async def test_model_exception_in_the_night_job_does_not_repeat_consolidation() 
     print("PASS policy: a model exception in the night job is retried without repeating consolidation or its memories")
 
 
+async def test_talk_gate() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        event = FakeEvent("x", messages=[])
+
+        def fresh(name: str, **overrides) -> tuple[Main, list[str]]:
+            instance = stateful(f"{directory}/{name}", **overrides)
+            instance._proactive_chat.energy = 80.0
+            prompts: list[str] = []
+
+            async def call(system_prompt: str, prompt: str, **_):
+                prompts.append(prompt)
+                return "PASS"
+
+            instance._model_call = call
+            return instance, prompts
+
+        # Her name, a reply to her and a question each raise the chance; names ignore case.
+        gate, _ = fresh("gate", roll=1.0)
+        chat = gate._proactive_chat
+        gate.bot_names = ["Tester"]
+
+        def chance(group: str, text: str, **kwargs):
+            chat.record(
+                group, "甲", text, time.monotonic(), sender_id="1", awaits_verdict=True, **kwargs
+            )
+            return gate._chat_gate(group, chat.begin_judgement(group, time.monotonic()))
+
+        plain, plain_features = chance("g1", "今天好热")
+        named, named_features = chance("g2", "hey TESTER 今天好热")
+        replied, replied_features = chance("g3", "今天好热", reply_to_her=True)
+        asked, _ = chance("g4", "今天热吗？")
+        assert named > plain and replied > plain and asked > plain
+        assert named_features["mention"] and not plain_features["mention"]
+        assert replied_features["reply"] and not plain_features["reply"]
+
+        # A missed roll makes no model call and resolves the verdicts.
+        quiet, prompts = fresh("quiet", roll=1.0)
+        entry = quiet._proactive_chat.record(
+            GROUP_ID, "甲", "随便聊聊", time.monotonic(), sender_id="1", awaits_verdict=True
+        )
+        await quiet._judge_chatter(event, GROUP_ID)
+        assert prompts == [] and entry.verdict.done() and await entry.verdict is None
+        [skipped] = quiet.store.talk_log()
+        assert skipped["outcome"] == "skip" and 0 < skipped["p"] < 1
+        assert {"z", "bias", "share_now", "heat", "urge", "energy"} <= set(json.loads(skipped["features"]))
+
+        # A busy model slot leaves the batch unjudged; a later message judges both lines.
+        busy, prompts = fresh("busy", roll=0.0, max_concurrency=1)
+        busy_chat = busy._proactive_chat
+        first = busy_chat.record(
+            GROUP_ID, "甲", "第一句", time.monotonic(), sender_id="1", awaits_verdict=True
+        )
+        await busy._llm_slots.acquire()
+        await busy._judge_chatter(event, GROUP_ID)
+        assert prompts == [] and not first.verdict.done()
+        assert [r["outcome"] for r in busy.store.talk_log()] == ["busy"]
+        busy_chat.record(
+            GROUP_ID, "甲", "第二句", time.monotonic(), sender_id="1", awaits_verdict=True
+        )
+        busy._llm_slots.release()
+        await busy._judge_chatter(event, GROUP_ID)
+        assert len(prompts) == 1 and "1. 甲：第一句" in prompts[0] and "2. 甲：第二句" in prompts[0]
+        assert first.verdict.done()
+
+        # A spent fuse stops judging; the batch is resolved without a model call.
+        fused, prompts = fresh("fused", roll=0.0, daily_call_fuse=1)
+        fused._count_call(GROUP_ID)
+        entry = fused._proactive_chat.record(
+            GROUP_ID, "甲", "还有人吗", time.monotonic(), sender_id="1", awaits_verdict=True
+        )
+        await fused._judge_chatter(event, GROUP_ID)
+        assert prompts == [] and await entry.verdict is None
+        assert [r["outcome"] for r in fused.store.talk_log()] == ["fuse"]
+
+        # Every line she says, and every member message, moves the group's state.
+        talker, _ = fresh("talker", roll=1.0)
+        with mock.patch.object(main_module, "QUIET_SECONDS", 0):
+            replying = FakeEvent(
+                "好的",
+                messages=[
+                    main_module.Reply(id="1", chain=[], sender_id=int(BOT_ID)),
+                    main_module.Plain("好的"),
+                ],
+                sender_id="u1",
+            )
+            await talker.handle_group_chatter(replying)
+        assert talker._proactive_chat.last_message(GROUP_ID).reply_to_her
+        assert abs(talker.store.talk(GROUP_ID)["total"] - 1.0) < 0.01
+        talker._note_reply(GROUP_ID, "说一句")
+        row = talker.store.talk(GROUP_ID)
+        assert abs(row["her"] - 1.0) < 0.01 and abs(row["total"] - 2.0) < 0.01
+        assert abs(row["heat"] - talker.s.talk_contagion) < 0.01
+    print("PASS policy: the gate rolls before any model call; busy and fuse leave or resolve batches; state follows the chat")
+
+
 async def main() -> None:
     test_scope_filters()
     test_public_interface_is_stable()
@@ -1442,6 +1580,7 @@ async def main() -> None:
     await test_decorated_result_at_rule()
     await test_chatter_judgement()
     await test_chatter_wakes_the_model_for_an_open_question()
+    await test_talk_gate()
     await test_answer_marker_is_stripped_and_applied()
     await test_garbled_markers_never_leak()
     await test_state_block_and_burst_rules_in_the_request()

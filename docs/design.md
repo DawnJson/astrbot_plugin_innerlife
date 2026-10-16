@@ -19,7 +19,8 @@ innerlife 是 **群聊机器人拟人化框架**：只管"她是谁、她怎么�
 | `settings.py` | 唯一的配置解析 `Settings.from_config`；默认值只在 `_conf_schema.json` 里，代码里没有第二份 |
 | `jobs.py` | 夜间任务（整理、日记）；`Upkeep`：天气、日程、新闻、夜间任务各自的节奏和重试时间 |
 | `store.py` | 唯一的持久化：`innerlife.db` 的全部表 |
-| `proactive_chat.py` | 群聊缓冲、判断状态、每日计数、全群共用的兴致 |
+| `proactive_chat.py` | 群聊缓冲、判断状态、全群共用的兴致 |
+| `talk.py` | 说话量的纯公式：特征 → z → 概率，bias / 占比 / 热度 / 冲动的更新（不依赖 AstrBot） |
 | `mind.py` `emotion.py` `memory.py` `diary.py` `marker.py` | 情绪好感记忆日记的规则和内部标记协议 |
 | `life.py` | 天气、节假日、新闻抓取 |
 | `tools.py` | `ToolGate`：只服务她自己画图（屏蔽词、每日次数、取图） |
@@ -100,8 +101,11 @@ if innerlife is not None and innerlife.star_cls is not None:
 | `night_jobs (day, step)` | 夜间任务每一步完成了就记一行（`consolidate` `daily` `weekly` `monthly`，最后 `complete`），只留最近 7 天 |
 | `tool_usage (day, name, count)` | 画图当天用了几次，翻日时清掉前几天 |
 | `disabled_groups (group_id)` | 被群管 `/机器人 关闭` 的群 |
+| `talk (group_id, bias, her, total, heat, urge, updated_at)` | 每群的说话状态，见"说话量"；一直保留 |
+| `talk_log (at, group_id, kind, p, outcome, features)` | 说话决策日志，只留 14 天 |
+| `model_calls (group_id, day, hour, count)` | 每群后台聊天调用的熔断计数，只留当天 |
 
-`chat_log` 里她自己说的话 `user_id` 写 `self`、`name` 写"你"。`emotions.held` 是吵架后拉长衰减的倍数。`mood.energy` 是兴致。人、记忆、日记每次用到都从库里读，用 SQLite 工具从外面改了立刻生效。`memories.strength` 存的是 `last_mentioned` 时刻的值，当前强度 = `strength × 0.5^(天数 / (半衰期 × √提及次数))`，低于阈值在夜间任务里删除。
+`chat_log` 里她自己说的话 `user_id` 写 `self`、`name` 写"你"。`emotions.held` 是吵架后拉长衰减的倍数。`mood.energy` 是兴致。人、记忆、日记每次用到都从库里读，用 SQLite 工具从外面改了立刻生效。`memories.strength` 存的是 `last_mentioned` 时刻的值，当前强度 = `strength × 0.5^(天数 / (半衰期 × √提及次数))`，低于阈值在夜间任务里删除。`talk.updated_at` 是该群状态上次推进到的时刻（秒），`her` `total` `heat` 都是推进到那时的值。
 
 状态不再放在 JSON 文件里（旧版的 `jobs.json`、`tool_usage.json`、`reply_switch.json`），写到一半被杀也不会留下坏文件。旧状态不自动迁移，升级时由部署者一次性手工导入。
 
@@ -122,10 +126,59 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 - **具体情绪**（`emotions` 表）：强度按半衰期衰减，对人的生气委屈按 `emotion.temper_grudge` 放慢。
 - **背景心情**（`mood` 表的 valence × arousal）：被具体情绪推动，按 `emotion.mood_half_life_hours` 回到基线。
-- **兴致**（energy，也存在 `mood` 表）：每次说话消耗、安静时恢复，决定她插不插话、拆几条；全群共用一个值（她是同一个人），重启后接上。
+- **兴致**（energy，也存在 `mood` 表）：每次说话消耗、安静时按时间常数恢复（见"说话量"），影响开口概率和拆几条；全群共用一个值（她是同一个人），重启后接上。
 - **好感**（`people` 表）：每人一个分数，向 0 淡化，有下限；示好只在好感为负时按 `emotion.temper_soften` 倍加速，且一次最多回到 0。
 
 触发：别人对她说的话（标记）、自己主动说的话 15 分钟没人接、每天日程生成时的起床心情、`insulted_bot` 信号。状态块告诉她可以把心情说出来、被问会讲原因、答案内容不变只改口气；心情差时可以对好感达到"有好感"（25）的人吐苦水。性格参数（`temper_*`）可以调，其余数值是 `emotion.py` 的常量。
+
+## 说话量（`talk.py` `main.py`）
+
+没被 @ 时她说多少话**不设每日次数上限**，由她的状态决定：代码先算一个开口概率并掷骰，命中才付费调用判断模型（模型仍可输出 PASS）。成本只有一道熔断兜底。公式是 `talk.py` 里的纯函数，不依赖 AstrBot；掷骰是 `Main._roll`（默认 `random.random`），测试里可以换成固定值。
+
+### 状态
+
+- **兴致** `energy`（0–100，存 `mood.energy`，全群共用）：安静时按 `energy = 100 − (100 − energy)·exp(−Δt / (talk.stamina_minutes·60))` 恢复；她每发一行扣随机 10–35。
+- **每群状态**（`talk` 表：`group_id, bias, her, total, heat, urge, updated_at`，重启接上）：
+  - `her` / `total`：她的行数 / 全部行数（群友每条消息 `total+1`；她每发一行 `her+1`、`total+1`），都按半衰期 1 天衰减。`share_now = her / total`；`total < 20` 时数据太少，视为等于目标 `talk.share`。
+  - `bias`：开口倾向的底，初值 −3.0；每个决策点 `bias += 0.05·(share − share_now)`，夹在 [−6, −1]。她说得比目标少，倾向慢慢升；说得比目标多，慢慢降。
+  - `heat`：热度，她发言时 `+= talk.contagion`，按 `exp(−Δt / 240s)` 衰减。
+  - `urge`（0–1）：想开新话题的冲动，见下。
+
+每次读状态都先把它推进到当前时刻（`TalkState.advance`）：计数和热度衰减，冲动在她醒着时增长；睡觉的小时不涨，所以后台每分钟都会把每个群的状态存一遍，让"上次更新"始终是最新的。
+
+### 未 @ 消息
+
+决策点就是 `_judge_chatter`，在群的判断锁里：
+
+1. 模型槽已满（有 @ 请求在占）：直接返回，**不消费**这批消息——它们仍等着判断，之后的消息会连它们一起判断。记日志 `busy`。
+2. 熔断到了：这批消息的结果置 `None`，不调用模型。记日志 `fuse`。
+3. 对本批**新**消息（还没被判断过的）算特征：`A` 有消息含她的名字（`basic.bot_names`，不分大小写）；`R` 有人回复或引用了她（收到消息时从 `Reply` 组件的发送者认出）；`Q` 有问号（权重 0.8，配置了 `basic.support_scope` 时 1.6）；`aff` 本批发言人里最高的好感 / 100，夹在 [−0.6, 1]；`arousal` 当前心情激动度（0–1）；`B = max(energy / 100, 0.05)`；`n` 本批新消息条数。
+
+   `z = bias + 2.0·A + 2.2·R + Qw·Q + 1.0·aff + 0.8·arousal + ln B + heat + 0.5·ln n`，`p = 1 / (1 + exp(−z / talk.temperature))`。
+4. 掷骰 `random() < p` 才继续，否则这批结果置 `None`、不调用模型，记 `skip`。命中后和以前一样调用判断模型（提示词不变），计入熔断；输出 PASS、ASK 或要说的话。
+5. ASK 代答没有每日上限：等人先答之后的"问题还开着吗"复核调用和代答本身也都计入熔断，熔断到了就不答。
+
+### 主动话题
+
+每分钟一轮（`_topic_step`）：睡着、`proactive.enabled` 关、熔断到了都跳过。冲动 `urge += (1 − urge)·(1 − exp(−Δt / (talk.urge_hours·3600)))`，醒着时一直涨，Δt 从上次更新算起。群里最后一条群友消息要已安静 `proactive.proactive_quiet_minutes`，模型槽和判断锁都空，然后掷骰：`p = 0.0127·urge²·B` 每分钟。未中就等下一分钟；命中才调用模型，发出了话题 `urge *= 0.3`，PASS 或调用失败 `urge *= 0.6`。冲动满、兴致满时，平均约 79 分钟（`1 / 0.0127`）命中一次。
+
+### 成本熔断
+
+每个群每天后台聊天类模型调用（判断、复核、主动话题、代答本身）数到 `basic.daily_call_fuse`（默认 300）就停：不再判断闲聊、不开话题、不代答，只回 @。`0` 表示一直如此（收到消息时就不建待判断的结果）。另有常量 `HOURLY_CALL_FUSE = 30`（每群每小时）。计数存在 `model_calls` 表（`group_id, day, hour, count`），重启不清零，按 `basic.timezone` 翻日，翻日时清掉前几天；到限时记一条 warning。它是成本保险，不是控制她说多少话的旋钮。
+
+### 决策日志
+
+`talk_log(at, group_id, kind, p, outcome, features)`：每次判断和每次命中的主动话题记一行，用来调参。`kind` 是 `chat` / `topic`；`outcome` 是 `skip`（没掷中）/ `PASS` / `CHAT` / `ASK` / `fuse` / `busy` / `fail`（模型调用失败）/ `sent`（话题发出）；`features` 是 JSON，含 `z`、各特征、`bias`、`share_now`、`heat`、`urge`、`energy`。夜间清理只留 14 天。主动话题每分钟没掷中的不记，否则每群每天 1440 行。
+
+### 旋钮（`talk` 分组）
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `share` | 0.10 | 她大约占群里发言的比例，目标值，由 `bias` 慢慢闭环逼近，不是硬上限 |
+| `temperature` | 1.0 | 随机程度：越高越可能在弱理由下开口，越低越只在理由充分时开口 |
+| `stamina_minutes` | 45 | 兴致从低处恢复的时间常数（分钟） |
+| `urge_hours` | 4 | 群冷着时想开新话题的冲动攒到约 63% 的时间（小时），3 倍时间约 95% |
+| `contagion` | 0.5 | 聊开了以后接着说的倾向：她每说一行热度加这么多 |
 
 ## 记忆（`memory.py` `jobs.py`）
 
@@ -145,11 +198,11 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 ## 生活（`life.py` `jobs.py`）
 
-后台每分钟一轮：天气（open-meteo）和日子类型（`life.holiday_url`，失败时按星期几）、新闻（RSS，只在 `news` 表里当素材，`life.news_blocked_terms` 过滤）、她醒来后生成当天日程（日期、日子类型、醒来时间、天气、人设、昨天日程和打算）。每一轮的错误都记完整的堆栈。日程、每日计数（判断、代答、画图、主动话题）和日记里的时刻都按 `basic.timezone` 翻日和显示。
+后台每分钟一轮：天气（open-meteo）和日子类型（`life.holiday_url`，失败时按星期几）、新闻（RSS，只在 `news` 表里当素材，`life.news_blocked_terms` 过滤）、她醒来后生成当天日程（日期、日子类型、醒来时间、天气、人设、昨天日程和打算）。每一轮的错误都记完整的堆栈。日程、每日计数（熔断、画图）和日记里的时刻都按 `basic.timezone` 翻日和显示。
 
 睡觉：日程最后一行由模型写当晚的睡觉时间（22:00 到次日 02:59，`jobs.sleep_window` 取最后一条带"睡"字且在这个范围内的时刻），从这时起睡 `SLEEP_HOURS`（7）小时，醒来时间就是第二天日程的开始时间。某天没有日程或没写睡觉时间，按 0 点睡、7 点醒。
 
-主动开话题：睡着时（上面的睡觉窗口）不尝试；群里最后一条消息安静 `proactive.proactive_quiet_minutes` 以上、兴致够、没超每日上限、距上次考虑超过 `proactive.proactive_min_gap_minutes`、没有请求在占并发槽，才会调用一次模型；气氛（有人排障、刚发过通知、深夜、上次主动说的没人接）由模型读时间、聊天记录自己判断，输出 PASS 或话头。每日上限只数发出去的话头，不限制调用次数；调用频率上限是 `1440 / 间隔` 次每群每天。
+主动开话题的节奏由"说话量"里的冲动和掷骰决定：睡着时（上面的睡觉窗口）、开关关、熔断到了都不尝试；群里最后一条群友消息安静 `proactive.proactive_quiet_minutes` 以上、没有请求在占并发槽、没有判断在进行，才按冲动掷骰，命中才调用一次模型；气氛（有人排障、刚发过通知、深夜、上次主动说的没人接）由模型读时间、聊天记录自己判断，输出 PASS 或话头。
 
 ## 工具（`tools.py`）
 
@@ -164,7 +217,7 @@ AstrBot 的 `OnUsingLLMToolEvent` 钩子**拦不住**工具调用（`tool_loop_a
 
 ## 模型调用
 
-后台所有模型调用（插话判断、代答复核、主动话题、骂回去、整理、日记、日程）走同一个入口 `Main._model_call`：任何异常（超时、中转报错）都记带堆栈的日志并返回 `None`，上层按"这次没成"处理。聊天类调用在并发槽占满时直接让路（@ 请求优先）；夜间任务不占槽、超时 300 秒并自动补一段"不要联网搜索"的规则。
+后台所有模型调用（插话判断、代答复核、主动话题、骂回去、整理、日记、日程）走同一个入口 `Main._model_call`：任何异常（超时、中转报错）都记带堆栈的日志并返回 `None`，上层按"这次没成"处理。聊天类调用在并发槽占满时直接让路（@ 请求优先）；夜间任务不占槽、超时 300 秒并自动补一段"不要联网搜索"的规则。其中判断、复核、主动话题和代答本身（骂回去和夜间任务不算）计入每群的成本熔断，见"说话量"。
 
 ## 连发（`burst.py`）
 
@@ -176,6 +229,6 @@ AstrBot 的 `OnUsingLLMToolEvent` 钩子**拦不住**工具调用（`tool_loop_a
 - **范围外的请求一律拦掉**：不是 aiocqhttp 群、或不在 `group_ids` 里的请求，会在 `on_waiting_llm_request` 和 `on_llm_request`（priority 300）`stop_event()`。这意味着 WebUI 自带聊天、私聊和其他平台在装了这个插件后用不了 AstrBot 的模型。目前不改，部署前请知晓。
 - AstrBot 人格只用来**提供出错提示**：启动时创建或更新 `basic.astrbot_persona_id` 对应的人格，内容是安全底线加人设、不带工具，唯一真正被用到的是它的 `custom_error_message`（取自 `messages.model_error_message`，模型调用报错时 AstrBot 用它代替原始异常发到群里）。她平时的系统提示词每次请求都在 300 被覆盖成现拼的版本，不读这个人格。
 - AstrBot 的插件配置没有自由字典类型（4.26.7 的 schema 支持 `int` `float` `bool` `string` `text` `list` `file` `object` `template_list`，没有 `dict`），所以 `draw.draw_tool_arguments` 填 JSON 文本。
-- 重启会丢：最近 15 分钟的群聊缓冲、当天的主动话题次数和代答次数、`note_bot_message` 的"刚发过通知"记录、"说了没人理"的记录、群 → 会话的对应关系（要等有人说话才恢复主动开话题）。这些都不持久化。
+- 重启会丢：最近 15 分钟的群聊缓冲、`note_bot_message` 的"刚发过通知"记录、"说了没人理"的记录、群 → 会话的对应关系（要等有人说话才恢复主动开话题）。这些都不持久化；说话状态（`talk` 表）和熔断计数（`model_calls` 表）在库里，重启后接上。
 - 功能插件自己的命令回复不进她的对话记录（见上）。
 - `/忘掉我` 不覆盖其他记忆插件的数据（见"隐私"）。

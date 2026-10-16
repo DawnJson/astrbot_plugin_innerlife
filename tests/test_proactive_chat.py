@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import datetime
-import sys
+import math
 import unittest
-from pathlib import Path
 
-
-PLUGIN_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PLUGIN_DIR))
-
-from proactive_chat import (  # noqa: E402
+import support  # noqa: F401  (puts the plugin's parent on sys.path)
+from astrbot_plugin_innerlife.proactive_chat import (  # noqa: E402
     ASK,
     BURST_MESSAGES,
-    DAILY_ANSWER_LIMIT,
     ENERGY_COST_RANGE,
     MOODS,
     ProactiveChat,
@@ -23,8 +16,8 @@ from proactive_chat import (  # noqa: E402
 )
 
 
-def new_chat(judgement_limit: int = 1500, tz: datetime.tzinfo = datetime.timezone.utc) -> ProactiveChat:
-    return ProactiveChat(tz, judgement_limit)
+def new_chat(stamina_minutes: float = 45.0) -> ProactiveChat:
+    return ProactiveChat(stamina_minutes)
 
 
 def record(chat: ProactiveChat, speaker: str, text: str, now: float, *, ask: bool = False):
@@ -117,50 +110,6 @@ class ChatStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(chat.others_active("1", first))
         self.assertIn("你：我说话了", chat.thread_from("1", first))
 
-    async def test_daily_answer_budget(self) -> None:
-        chat = new_chat()
-        for _ in range(DAILY_ANSWER_LIMIT):
-            self.assertTrue(chat.claim_answer("1"))
-        self.assertFalse(chat.claim_answer("1"))
-        self.assertFalse(chat.answers_left("1"))
-        self.assertTrue(chat.answers_left("2"))
-
-    async def test_judgement_limit_is_per_group_and_zero_means_only_mentions(self) -> None:
-        chat = new_chat(judgement_limit=1)
-        first = record(chat, "甲", "一", 1.0, ask=True)
-        self.assertIsNotNone(first.verdict)
-        self.assertEqual(chat.begin_judgement("1", 1.0), [first])
-        second = record(chat, "甲", "二", 2.0, ask=True)
-        self.assertIsNone(second.verdict)
-        self.assertIsNone(chat.begin_judgement("1", 2.0))
-        other = chat.record("2", "乙", "嗨", 3.0, sender_id="乙", awaits_verdict=True)
-        self.assertIsNotNone(other.verdict)
-
-        silent = new_chat(judgement_limit=0)
-        self.assertIsNone(record(silent, "甲", "问题", 1.0, ask=True).verdict)
-        self.assertIsNone(silent.begin_judgement("1", 1.0))
-
-    async def test_daily_counts_roll_over_in_the_configured_timezone(self) -> None:
-        class Clock(datetime.tzinfo):
-            """A zone whose date is whatever the test says it is."""
-
-            def __init__(self) -> None:
-                self.offset = datetime.timedelta(hours=12)
-
-            def utcoffset(self, dt):
-                return self.offset
-
-            def dst(self, dt):
-                return datetime.timedelta(0)
-
-        zone = Clock()
-        chat = new_chat(tz=zone)
-        for _ in range(DAILY_ANSWER_LIMIT):
-            chat.claim_answer("1")
-        self.assertFalse(chat.answers_left("1"))
-        zone.offset = datetime.timedelta(hours=-12)  # the same instant, one calendar day earlier
-        self.assertTrue(chat.answers_left("1"))
-
 
 class EnergyTests(unittest.IsolatedAsyncioTestCase):
     async def test_speaking_spends_energy_and_quiet_recovers_it(self) -> None:
@@ -171,10 +120,19 @@ class EnergyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(chat.energy, 100.0 - ENERGY_COST_RANGE[1])
 
         spent = chat.energy
-        chat.mood(10 * 60)
-        self.assertAlmostEqual(chat.energy, min(100.0, spent + 10.0))
-        chat.mood(10 * 60 + 3600 * 3)
-        self.assertEqual(chat.energy, 100.0)
+        chat.mood(45 * 60)  # one time constant: 1 - 1/e of the gap is back
+        self.assertAlmostEqual(chat.energy, 100.0 - (100.0 - spent) / math.e)
+        chat.mood(45 * 60 + 3600 * 6)
+        self.assertGreater(chat.energy, 99.9)
+
+    async def test_recovery_speed_follows_stamina_minutes(self) -> None:
+        slow, fast = new_chat(stamina_minutes=90), new_chat(stamina_minutes=10)
+        for chat in (slow, fast):
+            chat.energy = 20.0
+            chat.mood(0.0)
+            chat.mood(600.0)
+        self.assertLess(slow.energy, fast.energy)
+        self.assertAlmostEqual(fast.energy, 100.0 - 80.0 / math.e)
 
     async def test_energy_is_one_value_for_every_group(self) -> None:
         chat = new_chat()

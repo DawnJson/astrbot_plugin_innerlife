@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 import random
 import re
 from collections import deque
 from dataclasses import dataclass, field
+
+from . import talk
 
 MAX_BUFFERED_MESSAGES = 30
 PROMPT_MESSAGES = 15
@@ -21,15 +22,12 @@ ASK_WAIT_ALONE_SECONDS = 10
 ASK_ACTIVE_SECONDS = 5 * 60
 STALE_REPLY_SECONDS = 60
 STALE_REPLY_MESSAGES = 4
-DAILY_ANSWER_LIMIT = 30
 JUDGE_TIMEOUT_SECONDS = 30.0
 SELF_SPEAKER = "你"
 PASS_MARKER = "PASS"
 ASK = "ASK"
-# Her mood: energy recovers while she is quiet and each line she sends spends
-# a random amount, so after a stretch of chatting she may not feel like more.
-ENERGY_MAX = 100.0
-ENERGY_RECOVERY_PER_MINUTE = 1.0
+# Her mood: each line she sends spends a random amount of energy, which then recovers
+# with a time constant (see talk.recovered_energy).
 ENERGY_COST_RANGE = (10.0, 35.0)
 MOOD_JITTER = 10.0
 MOODS = (
@@ -91,6 +89,7 @@ class ChatMessage:
     text: str
     sender_id: str = ""
     images: list = field(default_factory=list)
+    reply_to_her: bool = False
     # Resolved by the judgement that covers this message: ASK when it is an
     # open question to answer, else None. Absent for messages nobody waits on.
     verdict: asyncio.Future | None = None
@@ -123,32 +122,21 @@ class _GroupState:
     )
     unjudged: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    day: datetime.date | None = None
-    answers_today: int = 0
-    judgements_today: int = 0
 
 
 class ProactiveChat:
-    """Keep recent group chat in memory and judge each burst of unmentioned chat.
+    """Keep recent group chat in memory and hand out each burst of unmentioned chat to be judged.
 
-    `tz` decides when a day ends for the daily counts; `judgement_limit` is how many
-    judgements a group gets per day. Her energy is one value for all groups."""
+    Her energy is one value for all groups; it recovers with time constant `stamina_minutes`."""
 
-    def __init__(self, tz: datetime.tzinfo, judgement_limit: int) -> None:
+    def __init__(self, stamina_minutes: float) -> None:
         self._groups: dict[str, _GroupState] = {}
-        self._tz = tz
-        self._judgement_limit = judgement_limit
+        self._stamina_minutes = stamina_minutes
         self.energy = random.uniform(30.0, 90.0)  # replaced by the saved value when there is one
         self._energy_at: float | None = None
 
     def _state(self, group_id: str) -> _GroupState:
-        state = self._groups.setdefault(group_id, _GroupState())
-        today = datetime.datetime.now(self._tz).date()
-        if state.day != today:
-            state.day = today
-            state.answers_today = 0
-            state.judgements_today = 0
-        return state
+        return self._groups.setdefault(group_id, _GroupState())
 
     def record(
         self,
@@ -160,6 +148,7 @@ class ProactiveChat:
         sender_id: str,
         awaits_verdict: bool,
         images: list | None = None,
+        reply_to_her: bool = False,
     ) -> ChatMessage:
         # One line per message and no member named like the bot, so a member
         # cannot forge a transcript line that reads as the bot's own words.
@@ -168,9 +157,9 @@ class ProactiveChat:
             name = "群友"
         state = self._state(group_id)
         entry = ChatMessage(
-            now, name, _one_line(text, MAX_MESSAGE_CHARS), sender_id, images or []
+            now, name, _one_line(text, MAX_MESSAGE_CHARS), sender_id, images or [], reply_to_her
         )
-        if awaits_verdict and state.judgements_today < self._judgement_limit:
+        if awaits_verdict:
             entry.verdict = asyncio.get_running_loop().create_future()
             state.unjudged += 1
         state.messages.append(entry)
@@ -178,8 +167,9 @@ class ProactiveChat:
 
     def _recover(self, now: float) -> None:
         if self._energy_at is not None:
-            minutes = (now - self._energy_at) / 60
-            self.energy = min(ENERGY_MAX, self.energy + minutes * ENERGY_RECOVERY_PER_MINUTE)
+            self.energy = talk.recovered_energy(
+                self.energy, now - self._energy_at, self._stamina_minutes
+            )
         self._energy_at = now
 
     def mood(self, now: float) -> str:
@@ -257,12 +247,11 @@ class ProactiveChat:
         )
 
     def begin_judgement(self, group_id: str, now: float) -> list[ChatMessage] | None:
-        """Return the lines to judge, or None when nothing new or the day's budget is spent."""
+        """Return the lines to judge and mark them taken, or None when nothing is new."""
         state = self._state(group_id)
-        if state.unjudged == 0 or state.judgements_today >= self._judgement_limit:
+        if state.unjudged == 0:
             return None
         state.unjudged = 0
-        state.judgements_today += 1
         return [
             entry
             for entry in state.messages
@@ -274,15 +263,10 @@ class ProactiveChat:
             if entry.verdict is not None and not entry.verdict.done():
                 entry.verdict.set_result(ASK if entry in targets else None)
 
-    def answers_left(self, group_id: str) -> bool:
-        return self._state(group_id).answers_today < DAILY_ANSWER_LIMIT
-
-    def claim_answer(self, group_id: str) -> bool:
-        state = self._state(group_id)
-        if state.answers_today >= DAILY_ANSWER_LIMIT:
-            return False
-        state.answers_today += 1
-        return True
+    @staticmethod
+    def fresh(entries: list[ChatMessage]) -> list[ChatMessage]:
+        """The lines nobody has judged yet."""
+        return [e for e in entries if e.verdict is not None and not e.verdict.done()]
 
     def numbered_transcript(self, entries: list[ChatMessage]) -> str:
         return "\n".join(

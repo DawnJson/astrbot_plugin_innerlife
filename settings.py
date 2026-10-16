@@ -41,7 +41,7 @@ class Settings:
     history_ttl_seconds: int
     max_images: int
     background_provider_id: str
-    chatter_daily_limit: int
+    daily_call_fuse: int
     vision: bool
     search_rules: bool
     timezone: str
@@ -84,9 +84,14 @@ class Settings:
 
     # proactive topics
     proactive: bool
-    proactive_daily_cap: int
     proactive_quiet_minutes: int
-    proactive_min_gap_minutes: int
+
+    # talk
+    talk_share: float
+    talk_temperature: float
+    talk_stamina_minutes: float
+    talk_urge_hours: float
+    talk_contagion: float
 
     # drawing
     draw: bool
@@ -100,10 +105,11 @@ class Settings:
 
     @classmethod
     def from_config(cls, config: dict) -> Settings:
-        basic, messages, emo, mem, life, pro, draw, burst = (
+        basic, messages, emo, mem, life, pro, talk, draw, burst = (
             config[group]
             for group in (
-                "basic", "messages", "emotion", "memory", "life", "proactive", "draw", "burst"
+                "basic", "messages", "emotion", "memory", "life", "proactive", "talk", "draw",
+                "burst",
             )
         )
         group_ids = frozenset(_list(basic["group_ids"]))
@@ -116,6 +122,9 @@ class Settings:
         if not persona_id:
             raise ValueError("astrbot_persona_id must not be empty")
         timezone = str(basic["timezone"]).strip()
+        for key in ("temperature", "stamina_minutes", "urge_hours"):
+            if float(talk[key]) <= 0:
+                raise ValueError(f"talk.{key} must be above 0")
         return cls(
             group_ids=group_ids,
             astrbot_persona_id=persona_id,
@@ -132,7 +141,7 @@ class Settings:
             history_ttl_seconds=int(basic["history_ttl_seconds"]),
             max_images=int(basic["max_images"]),
             background_provider_id=str(basic["background_provider_id"]).strip(),
-            chatter_daily_limit=int(basic["chatter_daily_limit"]),
+            daily_call_fuse=int(basic["daily_call_fuse"]),
             vision=bool(basic["vision"]),
             search_rules=bool(basic["search_rules"]),
             timezone=timezone,
@@ -172,9 +181,12 @@ class Settings:
             latitude=float(life["latitude"]),
             longitude=float(life["longitude"]),
             proactive=bool(pro["enabled"]),
-            proactive_daily_cap=int(pro["proactive_daily_cap"]),
             proactive_quiet_minutes=int(pro["proactive_quiet_minutes"]),
-            proactive_min_gap_minutes=int(pro["proactive_min_gap_minutes"]),
+            talk_share=float(talk["share"]),
+            talk_temperature=float(talk["temperature"]),
+            talk_stamina_minutes=float(talk["stamina_minutes"]),
+            talk_urge_hours=float(talk["urge_hours"]),
+            talk_contagion=float(talk["contagion"]),
             draw=bool(draw["enabled"]),
             draw_tool_name=str(draw["draw_tool_name"]).strip(),
             # AstrBot's schema has no free-form dict type: this is JSON text.

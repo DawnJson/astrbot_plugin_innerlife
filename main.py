@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
+import json
 import math
 import os
 import random
@@ -55,6 +56,15 @@ from .safety import (
 )
 from .settings import Settings
 from .store import Store
+from .talk import (
+    HOURLY_CALL_FUSE,
+    TOPIC_MISS_URGE,
+    TOPIC_SENT_URGE,
+    TalkState,
+    chat_logit,
+    probability,
+    topic_probability,
+)
 from .tools import BUILTIN_BLOCKED_TERMS, ToolGate
 
 SECURITY_PROMPT = """你是群里的聊天伙伴。回答应准确、简洁。
@@ -93,7 +103,6 @@ MAX_INPUT_CHARS = 4000
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024
 IGNORED_MINUTES = 15  # her unprompted line gets no answer for this long: she feels let down
-PROACTIVE_MIN_ENERGY = 40.0  # below this she does not start topics
 JAB_COOLDOWN_SECONDS = 600
 SWITCH_SAVE_FAILED_MESSAGE = "机器人回复设置保存失败，请稍后重试"
 
@@ -127,6 +136,14 @@ def _event_mentions_bot(event: AstrMessageEvent) -> bool:
     self_id = str(event.get_self_id())
     return any(
         isinstance(component, At) and str(component.qq) == self_id
+        for component in event.get_messages()
+    )
+
+
+def _event_replies_to_bot(event: AstrMessageEvent) -> bool:
+    self_id = str(event.get_self_id())
+    return any(
+        isinstance(component, Reply) and str(component.sender_id) == self_id
         for component in event.get_messages()
     )
 
@@ -244,7 +261,8 @@ class Main(star.Star):
         self._last_request_at: dict[str, float] = {}
         self._last_interaction_at: dict[str, float] = {}
         self._background_tasks: set[asyncio.Task] = set()
-        self._proactive_chat = ProactiveChat(s.tz, s.chatter_daily_limit)
+        self._proactive_chat = ProactiveChat(s.talk_stamina_minutes)
+        self._roll = random.random  # replaced in tests to make the dice deterministic
         self.store: Store | None = None
         self.mind: Mind | None = None
         self.gate: ToolGate | None = None
@@ -253,8 +271,6 @@ class Main(star.Star):
         self._umo: dict[str, str] = {}
         self._unprompted: dict[str, Any] = {}
         self._bot_notes: dict[str, float] = {}
-        self._topic_tried_at: dict[str, float] = {}
-        self._topic_count: dict[str, tuple[datetime.date, int]] = {}
         self._last_jab_at: dict[str, float] = {}
 
         global _group_ids
@@ -303,6 +319,62 @@ class Main(star.Star):
     def _now_dt(self) -> datetime.datetime:
         return datetime.datetime.now(self.s.tz)
 
+    def _talk_state(self, group_id: str) -> TalkState:
+        """The group's talking state brought up to now; save it to keep the change."""
+        now = time.time()
+        row = self.store.talk(group_id)
+        state = (
+            TalkState(updated_at=now)
+            if row is None
+            else TalkState(
+                row["bias"], row["her"], row["total"], row["heat"], row["urge"], row["updated_at"]
+            )
+        )
+        state.advance(
+            now, awake=not self.upkeep.asleep(self._now_dt()), urge_hours=self.s.talk_urge_hours
+        )
+        return state
+
+    def _save_talk(self, group_id: str, state: TalkState) -> None:
+        self.store.save_talk(
+            group_id, state.bias, state.her, state.total, state.heat, state.urge, state.updated_at
+        )
+
+    def _log_talk(self, group_id: str, kind: str, outcome: str, p: float | None, features: dict) -> None:
+        """One row per decision, for tuning the talk settings."""
+        self.store.log_talk(
+            time.time(),
+            group_id,
+            kind,
+            p,
+            outcome,
+            json.dumps(
+                {k: round(v, 3) if isinstance(v, float) else v for k, v in features.items()},
+                ensure_ascii=False,
+            ),
+        )
+
+    def _call_buckets(self) -> tuple[str, str]:
+        dt = self._now_dt()
+        return str(dt.date()), f"{dt:%Y-%m-%d %H}"
+
+    def _fuse_reached(self, group_id: str) -> bool:
+        """True when the group used up today's or this hour's background chat calls."""
+        day_count, hour_count = self.store.calls(group_id, *self._call_buckets())
+        return day_count >= self.s.daily_call_fuse or hour_count >= HOURLY_CALL_FUSE
+
+    def _count_call(self, group_id: str) -> None:
+        buckets = self._call_buckets()
+        self.store.add_call(group_id, *buckets)
+        day_count, hour_count = self.store.calls(group_id, *buckets)
+        if day_count == self.s.daily_call_fuse or hour_count == HOURLY_CALL_FUSE:
+            logger.warning(
+                "Call fuse reached in group %s: %s calls today, %s this hour",
+                group_id,
+                day_count,
+                hour_count,
+            )
+
     def _state_prompt(self, people: list[tuple[str, str]]) -> str:
         """Her mood, the people in this conversation, her day and her diary, from the db."""
         if self.mind is None:
@@ -348,14 +420,18 @@ class Main(star.Star):
         ]
 
     def _note_reply(self, group_id: str, text: str, *, spend: bool = True):
-        """Put her own line in the transcript and the day's log, and persist her energy."""
+        """Put her own line in the transcript, the day's log and the talk state, and persist her energy."""
         entry = self._proactive_chat.record_reply(
             group_id, text, time.monotonic(), spend=spend
         )
         if self.mind is not None:
             self.mind.save_energy(self._proactive_chat.energy, time.time())
-        if self.store is not None and (self.s.memory or self.s.diary):
-            self.store.log_line(group_id, "self", SELF_SPEAKER, text, time.time())
+        if self.store is not None:
+            state = self._talk_state(group_id)
+            state.said(1, self.s.talk_contagion)
+            self._save_talk(group_id, state)
+            if self.s.memory or self.s.diary:
+                self.store.log_line(group_id, "self", SELF_SPEAKER, text, time.time())
         return entry
 
     def note_bot_message(self, group_id: str, text: str) -> None:
@@ -557,42 +633,49 @@ class Main(star.Star):
                 self.mind.feel("失落", 0.35, None, "我说了没人理", time.time())
 
     async def _topic_step(self) -> None:
-        if not self.s.proactive or self.upkeep.asleep(self._now_dt()):
-            return
+        asleep = self.upkeep.asleep(self._now_dt())
         for group_id in list(self._umo):
-            await self._topic(group_id)
+            # Save the state every minute: the urge only grows while she is awake, and the
+            # sleeping hours are told apart by when the state was last brought up to date.
+            self._save_talk(group_id, self._talk_state(group_id))
+            if self.s.proactive and not asleep:
+                await self._topic(group_id)
+
+    def _settle_topic(
+        self, group_id: str, urge_factor: float, outcome: str, p: float, features: dict
+    ) -> None:
+        state = self._talk_state(group_id)
+        state.urge *= urge_factor
+        self._save_talk(group_id, state)
+        self._log_talk(group_id, "topic", outcome, p, features)
 
     async def _topic(self, group_id: str) -> None:
-        """When the group is quiet, let her decide whether to start a topic."""
+        """When the group is quiet, roll on her urge to start a topic; a hit lets her decide."""
         s = self.s
         chat = self._proactive_chat
         mono = time.monotonic()
         now = time.time()
         dt = self._now_dt()
-        if not self._group_enabled(group_id):
+        if not self._group_enabled(group_id) or self._fuse_reached(group_id):
             return
-        counted_day, count = self._topic_count.get(group_id, (dt.date(), 0))
-        if counted_day != dt.date():
-            count = 0
         last = chat.last_member_message(group_id)
         chat.mood(mono)
         if (
-            count >= s.proactive_daily_cap
-            or last is None
+            last is None
             or mono - last.at < s.proactive_quiet_minutes * 60
-            or mono - self._topic_tried_at.get(group_id, -math.inf)
-            < s.proactive_min_gap_minutes * 60
-            or chat.energy < PROACTIVE_MIN_ENERGY
             or self._llm_slots.locked()
             or chat.judge_lock(group_id).locked()
         ):
             return
-        self._topic_tried_at[group_id] = mono
+        state = self._talk_state(group_id)
+        p = topic_probability(state.urge, chat.energy)
+        if self._roll() >= p:
+            return
+        features = {"urge": state.urge, "energy": chat.energy, "bias": state.bias, "heat": state.heat}
         speakers = chat.recent_speakers(group_id, mono)
         facts = [
             f"现在时间：{dt:%H:%M}",
             f"距群里最后一条群友消息：{int((mono - last.at) // 60)} 分钟",
-            f"你今天已经主动开过 {count} 次话头",
         ]
         if chat.last_message(group_id).speaker == SELF_SPEAKER:
             facts.append("群里最后一条是你自己说的，之后没人接话")
@@ -624,18 +707,24 @@ class Main(star.Star):
             )
             if part
         )
+        self._count_call(group_id)
         answer = await self._model_call(system, prompt)
         if not answer:
+            self._settle_topic(group_id, TOPIC_MISS_URGE, "fail", p, features)
             return
         text, marker = parse_marker(answer)
         self._apply_marker(marker, group_id, speakers)
         parts = split_parts(text)
         first = parse_reply(parts[0]) if parts else None
-        if not first:
-            return
-        lines = [first, *(line for part in parts[1:] if (line := parse_reply(part)))]
-        messages = self._burst_messages(lines)
+        messages = (
+            self._burst_messages(
+                [first, *(line for part in parts[1:] if (line := parse_reply(part)))]
+            )
+            if first
+            else []
+        )
         if not messages:
+            self._settle_topic(group_id, TOPIC_MISS_URGE, "PASS", p, features)
             return
 
         async def send(chain: MessageChain) -> None:
@@ -644,7 +733,7 @@ class Main(star.Star):
         logger.info("Proactive topic: started in %s", group_id)
         await send(MessageChain().message(messages[0]))
         self._unprompted[group_id] = self._note_reply(group_id, messages[0])
-        self._topic_count[group_id] = (dt.date(), count + 1)
+        self._settle_topic(group_id, TOPIC_SENT_URGE, "sent", p, features)
         if marker.news:
             self.store.mark_news_used(
                 [news[number - 1]["link"] for number in marker.news if 0 < number <= len(news)],
@@ -733,11 +822,16 @@ class Main(star.Star):
             text,
             time.monotonic(),
             sender_id=sender_id,
-            awaits_verdict=enabled and not mentioned,
+            awaits_verdict=enabled and not mentioned and self.s.daily_call_fuse > 0,
             images=[c for c in event.get_messages() if isinstance(c, Image)]
             if self.s.vision
             else None,
+            reply_to_her=_event_replies_to_bot(event),
         )
+        if self.store is not None:
+            state = self._talk_state(group_id)
+            state.heard()
+            self._save_talk(group_id, state)
         # Her answer to this message can tell from it whether anyone spoke afterwards.
         event.set_extra(_CHAT_ENTRY_KEY, entry)
         if entry.verdict is None:
@@ -765,11 +859,12 @@ class Main(star.Star):
         )
         if (
             not self._group_enabled(group_id)
-            or not self._proactive_chat.answers_left(group_id)
+            or self._fuse_reached(group_id)
             or not await self._question_still_open(group_id, entry)
-            or not self._proactive_chat.claim_answer(group_id)
+            or self._fuse_reached(group_id)
         ):
             return
+        self._count_call(group_id)
         logger.info("Proactive chat: answering an unmentioned question")
         event.set_extra(_PROACTIVE_ANSWER_KEY, True)
         event.is_at_or_wake_command = True
@@ -795,23 +890,68 @@ class Main(star.Star):
             paths.append(path)
         return paths, downloaded
 
+    def _chat_gate(self, group_id: str, entries) -> tuple[float, dict]:
+        """The chance she speaks up on this batch, with the numbers behind it for the log."""
+        s = self.s
+        chat = self._proactive_chat
+        fresh = chat.fresh(entries)
+        names = [name.casefold() for name in self.bot_names]
+        now = time.time()
+        state = self._talk_state(group_id)
+        state.steer(s.talk_share)
+        self._save_talk(group_id, state)
+        features = {
+            "mention": any(name in e.text.casefold() for e in fresh for name in names),
+            "reply": any(e.reply_to_her for e in fresh),
+            "question": any("?" in e.text or "？" in e.text for e in fresh),
+            "scoped": bool(s.support_scope),
+            "affinity": max((self.mind.affinity(e.sender_id, now) for e in fresh), default=0.0),
+            "arousal": self.mind.mood(now)[1],
+            "energy": chat.energy,
+            "count": len(fresh),
+        }
+        z = chat_logit(state, **features)
+        p = probability(z, s.talk_temperature)
+        return p, {
+            **features,
+            "z": z,
+            "bias": state.bias,
+            "share_now": state.share_now(s.talk_share),
+            "heat": state.heat,
+            "urge": state.urge,
+        }
+
     async def _judge_chatter(self, event: AstrMessageEvent, group_id: str) -> None:
         followups: list = []
-        async with self._proactive_chat.judge_lock(group_id):
-            entries = self._proactive_chat.begin_judgement(group_id, time.monotonic())
+        chat = self._proactive_chat
+        async with chat.judge_lock(group_id):
+            # An @ request holds the model slot: leave the batch unjudged, a later message takes it.
+            if self._llm_slots.locked():
+                self._log_talk(group_id, "chat", "busy", None, {})
+                return
+            fused = self._fuse_reached(group_id)
+            entries = chat.begin_judgement(group_id, time.monotonic())
             if entries is None:
                 return
             targets = []
             downloaded: list[str] = []
             try:
+                if fused:
+                    self._log_talk(group_id, "chat", "fuse", None, {})
+                    return
                 mono = time.monotonic()
-                mood = self._proactive_chat.mood(mono)
+                mood = chat.mood(mono)
+                p, features = self._chat_gate(group_id, entries)
+                if self._roll() >= p:
+                    logger.info("Proactive chat: stayed quiet (p=%.2f)", p)
+                    self._log_talk(group_id, "chat", "skip", p, features)
+                    return
                 names = (
                     f"群友也会叫你：{'、'.join(self.bot_names)}\n"
                     if self.bot_names
                     else ""
                 )
-                speakers = self._proactive_chat.recent_speakers(group_id, mono)
+                speakers = chat.recent_speakers(group_id, mono)
                 rules = self._rules(self._burst_cap())
                 system = "\n\n".join(
                     part
@@ -828,6 +968,7 @@ class Main(star.Star):
                 images, downloaded = (
                     await self._judge_images(entries) if self.s.vision else ([], [])
                 )
+                self._count_call(group_id)
                 answer = await self._model_call(
                     system,
                     f"你此刻的状态：{mood}\n{names}"
@@ -837,7 +978,7 @@ class Main(star.Star):
                         else ""
                     )
                     + "\n"
-                    + self._proactive_chat.numbered_transcript(entries),
+                    + chat.numbered_transcript(entries),
                     image_urls=images,
                 )
                 text, marker = parse_marker(answer or "")
@@ -848,23 +989,23 @@ class Main(star.Star):
                 )
                 messages = (
                     self._burst_messages(
-                        [line, *(r for p in parts[1:] if (r := parse_reply(p)))]
+                        [line, *(r for part in parts[1:] if (r := parse_reply(part)))]
                     )
                     if line
                     else []
                 )
                 reply = messages[0] if messages else None
-                logger.info(
-                    "Proactive chat judged: %s (%s)",
-                    f"ASK {len(targets)}" if targets else "CHAT" if reply else "PASS",
-                    mood.split("：")[0],
+                outcome = (
+                    "fail" if answer is None else "ASK" if targets else "CHAT" if reply else "PASS"
                 )
+                self._log_talk(group_id, "chat", outcome, p, features)
+                logger.info("Proactive chat judged: %s (%s)", outcome, mood.split("：")[0])
                 if not reply:
                     return
                 # Drop a line the chat has already moved past; @ the member she
                 # answers when others spoke after it.
                 target = next(e for e in reversed(entries) if e.speaker != SELF_SPEAKER)
-                later = self._proactive_chat.later_messages(group_id, target)
+                later = chat.later_messages(group_id, target)
                 if (
                     later is None
                     or later >= STALE_REPLY_MESSAGES
@@ -887,7 +1028,7 @@ class Main(star.Star):
                     followups.append(self._draw_and_send(event, marker.draw, event.send))
             finally:
                 self._delete_files(downloaded)
-                self._proactive_chat.finish_judgement(entries, targets)
+                chat.finish_judgement(entries, targets)
         for followup in followups:
             await followup
 
@@ -895,6 +1036,7 @@ class Main(star.Star):
         thread = self._proactive_chat.thread_from(group_id, entry)
         if thread is None:
             return False
+        self._count_call(group_id)
         answer = await self._model_call(ANSWERED_CHECK_PROMPT, thread)
         return (answer or "").strip().upper().startswith("OPEN")
 

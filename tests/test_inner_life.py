@@ -33,6 +33,9 @@ CONTRACT_COLUMNS = {
     "night_jobs": ["day", "step"],
     "tool_usage": ["day", "name", "count"],
     "disabled_groups": ["group_id"],
+    "talk": ["group_id", "bias", "her", "total", "heat", "urge", "updated_at"],
+    "talk_log": ["at", "group_id", "kind", "p", "outcome", "features"],
+    "model_calls": ["group_id", "day", "hour", "count"],
 }
 
 
@@ -314,6 +317,37 @@ class StoreTests(unittest.TestCase):
             outside.close()
             self.assertEqual(store.person("1")["impression"], "改过的")
             self.assertEqual(store.diary("daily", "2026-10-16")["edited_at"], 9)
+
+    def test_talk_state_and_fuse_counts_survive_a_new_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "innerlife.db"
+            store = Store(path)
+            self.assertIsNone(store.talk("g"))
+            store.save_talk("g", -2.5, 3.0, 40.0, 0.7, 0.4, 50.0)
+            store.add_call("g", "2026-10-16", "2026-10-16 09")
+            store.add_call("g", "2026-10-16", "2026-10-16 09")
+            store.add_call("g", "2026-10-16", "2026-10-16 10")
+            store.add_call("h", "2026-10-16", "2026-10-16 10")
+            again = Store(path)
+            row = again.talk("g")
+            self.assertEqual(
+                (row["bias"], row["her"], row["total"], row["heat"], row["urge"], row["updated_at"]),
+                (-2.5, 3.0, 40.0, 0.7, 0.4, 50.0),
+            )
+            self.assertEqual(again.calls("g", "2026-10-16", "2026-10-16 09"), (3, 2))
+            self.assertEqual(again.calls("g", "2026-10-16", "2026-10-16 11"), (3, 0))
+            self.assertEqual(again.calls("g", "2026-10-17", "2026-10-17 00"), (0, 0))
+            again.add_call("g", "2026-10-17", "2026-10-17 00")  # a new day drops the old counts
+            self.assertEqual(again.calls("g", "2026-10-16", "2026-10-16 09"), (0, 0))
+
+    def test_prune_keeps_the_talk_log_for_14_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "innerlife.db")
+            day, now = 86400.0, 100 * 86400.0
+            store.log_talk(now - 15 * day, "g", "chat", 0.2, "skip", "{}")
+            store.log_talk(now - 13 * day, "g", "topic", 0.01, "sent", "{}")
+            jobs.prune(store, make_settings(), datetime.date(2026, 10, 17), now)
+            self.assertEqual([r["outcome"] for r in store.talk_log()], ["sent"])
 
     def test_prune_forgets_members_quiet_past_the_retention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -628,7 +662,8 @@ class SettingsTests(unittest.TestCase):
     def test_schema_defaults_build_the_settings(self) -> None:
         s = make_settings()
         self.assertEqual((s.vision, s.search_rules, s.person_keep_days), (True, False, 180))
-        self.assertEqual(s.chatter_daily_limit, 500)
+        self.assertEqual((s.daily_call_fuse, s.talk_share, s.talk_temperature), (300, 0.10, 1.0))
+        self.assertEqual((s.talk_stamina_minutes, s.talk_urge_hours, s.talk_contagion), (45, 4, 0.5))
         self.assertEqual(s.draw_tool_arguments, {})
         self.assertIn("习近平", s.draw_blocked_terms)
         self.assertTrue(s.news_feeds and s.news_blocked_terms)
@@ -639,6 +674,9 @@ class SettingsTests(unittest.TestCase):
             {"switch_command": " "},
             {"astrbot_persona_id": ""},
             {"consolidation_time": "25:00"},
+            {"temperature": 0},
+            {"stamina_minutes": 0},
+            {"urge_hours": -1},
         ):
             with self.assertRaises(ValueError, msg=overrides):
                 make_settings(**overrides)
