@@ -6,6 +6,7 @@ through the store and rolls the dice. Formulas and knobs are described in docs/d
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 HOURLY_CALL_FUSE = 30  # background chat model calls per group per hour
@@ -116,3 +117,12 @@ def probability(z: float, temperature: float) -> float:
 
 def topic_probability(urge: float, energy: float) -> float:
     return TOPIC_RATE * urge * urge * breadth(energy)
+
+
+_QUESTION_RE = re.compile(
+    "[?？]|什么|怎么|为什么|为啥|咋|啥|如何|哪|吗|么|呢|能不能|是不是|有没有|会不会|可不可以"
+)
+
+
+def is_question(text: str) -> bool:
+    return _QUESTION_RE.search(text) is not None

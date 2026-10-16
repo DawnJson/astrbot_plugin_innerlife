@@ -49,6 +49,12 @@ class GateTests(unittest.TestCase):
         self.assertGreater(logit(count=8), logit(count=1))
         self.assertGreater(logit(TalkState(heat=1.0)), logit(TalkState(heat=0.0)))
 
+    def test_question_words_count_without_a_question_mark(self) -> None:
+        for text in ("怎么配置", "是什么原因", "能不能用", "好用吗", "为啥报错", "有没有人", "哪个版本", "对吧？", "ok?"):
+            self.assertTrue(talk.is_question(text), text)
+        for text in ("今天好热", "哈哈哈", "我去吃饭了"):
+            self.assertFalse(talk.is_question(text), text)
+
 
 class ShareTests(unittest.TestCase):
     def test_share_below_target_raises_the_bias_and_above_lowers_it(self) -> None:

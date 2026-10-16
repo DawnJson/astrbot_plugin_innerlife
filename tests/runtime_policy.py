@@ -1542,6 +1542,26 @@ async def test_talk_gate() -> None:
         assert prompts == [] and await entry.verdict is None
         assert [r["outcome"] for r in fused.store.talk_log()] == ["fuse"]
 
+        # With a support scope a question without "?" reaches the judge even when she is tired
+        # and over her share; without a scope the same message goes through the roll.
+        text = "gpt-5.5 一直报 429 Too Many Requests 是什么原因"
+        for name, scope in (("scoped", "测试范围"), ("unscoped", "")):
+            asker, prompts = fresh(name, roll=1.0, support_scope=scope)
+            asker._proactive_chat.energy = 5.0
+            asker.store.save_talk(GROUP_ID, -6.0, 90.0, 100.0, 0.0, 0.0, time.time())
+            entry = asker._proactive_chat.record(
+                GROUP_ID, "甲", text, time.monotonic(), sender_id="1", awaits_verdict=True
+            )
+            await asker._judge_chatter(event, GROUP_ID)
+            assert entry.verdict.done()
+            [logged] = asker.store.talk_log()
+            if scope:
+                assert len(prompts) == 1 and logged["outcome"] == "PASS" and logged["p"] == 1.0
+                assert json.loads(logged["features"])["forced"] == "question"
+            else:
+                assert prompts == [] and logged["outcome"] == "skip"
+                assert "forced" not in json.loads(logged["features"])
+
         # Every line she says, and every member message, moves the group's state.
         talker, _ = fresh("talker", roll=1.0)
         with mock.patch.object(main_module, "QUIET_SECONDS", 0):

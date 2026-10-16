@@ -62,6 +62,7 @@ from .talk import (
     TOPIC_SENT_URGE,
     TalkState,
     chat_logit,
+    is_question,
     probability,
     topic_probability,
 )
@@ -903,7 +904,7 @@ class Main(star.Star):
         features = {
             "mention": any(name in e.text.casefold() for e in fresh for name in names),
             "reply": any(e.reply_to_her for e in fresh),
-            "question": any("?" in e.text or "？" in e.text for e in fresh),
+            "question": any(is_question(e.text) for e in fresh),
             "scoped": bool(s.support_scope),
             "affinity": max((self.mind.affinity(e.sender_id, now) for e in fresh), default=0.0),
             "arousal": self.mind.mood(now)[1],
@@ -911,8 +912,11 @@ class Main(star.Star):
             "count": len(fresh),
         }
         z = chat_logit(state, **features)
-        p = probability(z, s.talk_temperature)
+        # With a support scope an open question always reaches the judge, whatever her mood.
+        forced = {"forced": "question"} if features["scoped"] and features["question"] else {}
+        p = 1.0 if forced else probability(z, s.talk_temperature)
         return p, {
+            **forced,
             **features,
             "z": z,
             "bias": state.bias,
@@ -942,7 +946,7 @@ class Main(star.Star):
                 mono = time.monotonic()
                 mood = chat.mood(mono)
                 p, features = self._chat_gate(group_id, entries)
-                if self._roll() >= p:
+                if "forced" not in features and self._roll() >= p:
                     logger.info("Proactive chat: stayed quiet (p=%.2f)", p)
                     self._log_talk(group_id, "chat", "skip", p, features)
                     return
