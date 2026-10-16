@@ -25,7 +25,7 @@ innerlife 是 **群聊机器人拟人化框架**：只管"她是谁、她怎么�
 | `tools.py` | `ToolGate`：只服务她自己画图（屏蔽词、每日次数、取图） |
 | `burst.py` `safety.py` `reply_switch.py` | 连发规划；脱敏、链接白名单、高危识别；开关命令的解析和群管身份判断 |
 
-框架里的数字分两类：部署者会想调的在 `_conf_schema.json`（经 `Settings` 读取），其余是各模块顶部的命名常量（如 `main.py` 的 `HISTORY_MAX_TURNS`、`jobs.py` 的 `SCHEDULE_HOUR`、`emotion.py` 的 `AFFINITY_STEP`）。
+框架里的数字分两类：部署者会想调的在 `_conf_schema.json`（经 `Settings` 读取），其余是各模块顶部的命名常量（如 `main.py` 的 `HISTORY_MAX_TURNS`、`jobs.py` 的 `SLEEP_HOURS`、`emotion.py` 的 `AFFINITY_STEP`）。
 
 ## 框架和功能插件怎么配合
 
@@ -145,9 +145,11 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 ## 生活（`life.py` `jobs.py`）
 
-后台每分钟一轮：天气（open-meteo）和日子类型（`life.holiday_url`，失败时按星期几）、新闻（RSS，只在 `news` 表里当素材，`life.news_blocked_terms` 过滤）、6 点之后生成当天日程（日期、日子类型、天气、人设、昨天日程和打算）。每一轮的错误都记完整的堆栈。日程、每日计数（判断、代答、画图、主动话题）和日记里的时刻都按 `basic.timezone` 翻日和显示。
+后台每分钟一轮：天气（open-meteo）和日子类型（`life.holiday_url`，失败时按星期几）、新闻（RSS，只在 `news` 表里当素材，`life.news_blocked_terms` 过滤）、她醒来后生成当天日程（日期、日子类型、醒来时间、天气、人设、昨天日程和打算）。每一轮的错误都记完整的堆栈。日程、每日计数（判断、代答、画图、主动话题）和日记里的时刻都按 `basic.timezone` 翻日和显示。
 
-主动开话题：本地时间（`basic.timezone`）0 点到 8 点不尝试；群里最后一条消息安静 `proactive.proactive_quiet_minutes` 以上、兴致够、没超每日上限、距上次考虑超过 `proactive.proactive_min_gap_minutes`、没有请求在占并发槽，才会调用一次模型；气氛（有人排障、刚发过通知、深夜、上次主动说的没人接）由模型读时间、聊天记录自己判断，输出 PASS 或话头。每日上限只数发出去的话头，不限制调用次数；调用频率上限是 `1440 / 间隔` 次每群每天。
+睡觉：日程最后一行由模型写当晚的睡觉时间（22:00 到次日 02:59，`jobs.sleep_window` 取最后一条带"睡"字且在这个范围内的时刻），从这时起睡 `SLEEP_HOURS`（7）小时，醒来时间就是第二天日程的开始时间。某天没有日程或没写睡觉时间，按 0 点睡、7 点醒。
+
+主动开话题：睡着时（上面的睡觉窗口）不尝试；群里最后一条消息安静 `proactive.proactive_quiet_minutes` 以上、兴致够、没超每日上限、距上次考虑超过 `proactive.proactive_min_gap_minutes`、没有请求在占并发槽，才会调用一次模型；气氛（有人排障、刚发过通知、深夜、上次主动说的没人接）由模型读时间、聊天记录自己判断，输出 PASS 或话头。每日上限只数发出去的话头，不限制调用次数；调用频率上限是 `1440 / 间隔` 次每群每天。
 
 ## 工具（`tools.py`）
 

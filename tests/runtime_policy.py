@@ -1252,23 +1252,27 @@ async def test_topic_starter() -> None:
     print("PASS policy: proactive topics respect quiet, caps, gap, energy and the switch; the model decides PASS")
 
 
-async def test_topics_wait_for_the_morning() -> None:
+async def test_topics_wait_while_she_sleeps() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory)
-        started: list[str] = []
+        started: list[tuple[int, int, int]] = []
+        instance.store.save_life("2026-10-19", 1.0, schedule="09:00 起床\n23:30 睡觉")
+        instance.store.save_life("2026-10-20", 1.0, schedule="07:00 起床\n01:30 上床睡觉")
 
-        async def fake_topic(group_id: str) -> None:
-            started.append(group_id)
+        cases = ((19, 23, 20), (19, 23, 40), (20, 6, 20), (20, 6, 40), (21, 1, 20), (21, 8, 20), (21, 8, 40))
+        for day, hour, minute in cases:
+            now = datetime.datetime(2026, 10, day, hour, minute, tzinfo=instance.s.tz)
 
-        instance._topic = fake_topic
-        instance._umo[GROUP_ID] = "umo-1"
-        for hour in (0, 3, 7, 8, 14):
-            instance._now_dt = lambda hour=hour: datetime.datetime(
-                2026, 10, 20, hour, 30, tzinfo=instance.s.tz
-            )
+            async def fake_topic(group_id: str, at=(day, hour, minute)) -> None:
+                started.append(at)
+
+            instance._topic = fake_topic
+            instance._umo[GROUP_ID] = "umo-1"
+            instance._now_dt = lambda now=now: now
+            instance.upkeep._clock = lambda now=now: now
             await instance._topic_step()
-        assert started == [GROUP_ID, GROUP_ID]
-    print("PASS policy: no topic attempts between 00:00 and 08:00 in her timezone")
+        assert started == [(19, 23, 20), (20, 6, 40), (21, 1, 20), (21, 8, 40)], started
+    print("PASS policy: no topic attempts during the 7 hours after the bedtime in her schedule")
 
 
 async def test_model_call_never_raises_and_logs() -> None:
@@ -1447,7 +1451,7 @@ async def main() -> None:
     await test_judge_sees_images_and_bursts()
     await test_insult_signal_and_bot_notes()
     await test_topic_starter()
-    await test_topics_wait_for_the_morning()
+    await test_topics_wait_while_she_sleeps()
     await test_model_call_never_raises_and_logs()
     await test_ignored_and_nightly_steps()
     await test_model_exception_in_the_night_job_does_not_repeat_consolidation()

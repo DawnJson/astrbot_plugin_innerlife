@@ -576,7 +576,7 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
             store.save_life("2026-10-16", 1.0, weather="多云 29°C", day_kind="工作日")
-            store.save_life("2026-10-15", 1.0, schedule="09:00 赖床")
+            store.save_life("2026-10-15", 1.0, schedule="09:00 赖床\n01:30 睡觉")
             store.save_diary("daily", "2026-10-15", diary.normalize_daily("## 明天的打算\n去海边"), 1.0)
             seen: list[tuple[str, str]] = []
 
@@ -585,10 +585,11 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
                 return '09:00 起床\n12:00 吃饭\n<il>{"e":[{"k":"困","i":0.5,"why":"没睡醒"}]}</il>'
 
             settings = make_settings(city_name="三亚", persona_prompt="人设")
-            upkeep = jobs.Upkeep(
-                store, call, settings, None,
-                lambda: datetime.datetime(2026, 10, 16, 7, 0, tzinfo=tz),
-            )
+            clock = [datetime.datetime(2026, 10, 16, 8, 0, tzinfo=tz)]
+            upkeep = jobs.Upkeep(store, call, settings, None, lambda: clock[0])
+            self.assertIsNone(await upkeep.schedule())  # still asleep until 08:30
+            self.assertEqual(seen, [])
+            clock[0] = datetime.datetime(2026, 10, 16, 8, 30, tzinfo=tz)
             parsed = await upkeep.schedule()
             self.assertEqual(store.life("2026-10-16")["schedule"], "09:00 起床\n12:00 吃饭")
             self.assertEqual(store.life("2026-10-16")["weather"], "多云 29°C")
@@ -597,10 +598,23 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("住在三亚", system)
             for kind in emotion.KINDS:
                 self.assertIn(kind, system)
-            for wanted in ("多云 29°C", "工作日", "09:00 赖床", "去海边", "周五"):
+            for wanted in ("多云 29°C", "工作日", "09:00 赖床", "去海边", "周五", "醒来时间：08:30"):
                 self.assertIn(wanted, prompt)
             self.assertIsNone(await upkeep.schedule())
             self.assertEqual(len(seen), 1)
+
+    def test_sleep_window_follows_the_bedtime_line(self) -> None:
+        tz = make_settings().tz
+        day = datetime.date(2026, 10, 16)
+        at = lambda d, h, m: datetime.datetime(2026, 10, d, h, m, tzinfo=tz)  # noqa: E731
+        cases = {
+            "09:00 起床\n23:40 洗漱睡觉": (at(16, 23, 40), at(17, 6, 40)),
+            "09:00 起床\n02:10 睡觉": (at(17, 2, 10), at(17, 9, 10)),
+            "07:00 睡醒\n12:00 午睡": (at(17, 0, 0), at(17, 7, 0)),
+            "": (at(17, 0, 0), at(17, 7, 0)),
+        }
+        for schedule, window in cases.items():
+            self.assertEqual(jobs.sleep_window(schedule, day, tz), window, schedule)
 
     async def test_log_text_uses_the_given_timezone(self) -> None:
         row = {"at": 0.0, "name": "甲", "user_id": "1", "text": "嗨"}

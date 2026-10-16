@@ -1,7 +1,7 @@
 name: astrbot_plugin_innerlife
 display_name: innerlife
 desc: 群聊机器人拟人化框架：人设、情绪与好感、记忆、日记、日程天气新闻、主动开话题、自己画图、闲聊连发，以及安全底线和插话判断
-version: 0.4.0
+version: 0.4.1
 author: DawnJson
 repo: https://github.com/DawnJson/astrbot_plugin_innerlife
 astrbot_version: ">=4.26.7,<5"

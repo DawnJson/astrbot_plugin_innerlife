@@ -94,7 +94,6 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024
 IGNORED_MINUTES = 15  # her unprompted line gets no answer for this long: she feels let down
 PROACTIVE_MIN_ENERGY = 40.0  # below this she does not start topics
-TOPIC_NIGHT_END_HOUR = 8  # no topic attempts from 00:00 until this hour, local time
 JAB_COOLDOWN_SECONDS = 600
 SWITCH_SAVE_FAILED_MESSAGE = "机器人回复设置保存失败，请稍后重试"
 
@@ -558,7 +557,7 @@ class Main(star.Star):
                 self.mind.feel("失落", 0.35, None, "我说了没人理", time.time())
 
     async def _topic_step(self) -> None:
-        if not self.s.proactive or self._now_dt().hour < TOPIC_NIGHT_END_HOUR:
+        if not self.s.proactive or self.upkeep.asleep(self._now_dt()):
             return
         for group_id in list(self._umo):
             await self._topic(group_id)
