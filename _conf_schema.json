@@ -1,0 +1,512 @@
+{
+  "group_ids": {
+    "description": "生效的 QQ 群号，留空表示 AstrBot 送来的所有群",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "astrbot_persona_id": {
+    "description": "启动时创建或更新的 AstrBot 人格 ID",
+    "type": "string",
+    "default": "innerlife"
+  },
+  "persona_prompt": {
+    "description": "人设提示词",
+    "type": "text",
+    "default": "你是群里的一个普通群友，说话像真人打字一样自然简短。不用 Markdown，不分点列清单，不说“作为AI”“有什么可以帮您”之类的客服话术。"
+  },
+  "bot_names": {
+    "description": "群友对她的称呼，用于判断有没有在叫她",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "support_scope": {
+    "description": "她会主动代答的问题范围（一句话描述），留空则不主动代答，只闲聊",
+    "type": "string",
+    "default": ""
+  },
+  "allowed_link_domains": {
+    "description": "回复里允许出现的 HTTPS 域名（含子域名）",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "secret_env_vars": {
+    "description": "这些环境变量的值在输入、历史、附加内容和回复里一律脱敏",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "allowed_extra_content_prefixes": {
+    "description": "AstrBot 自己生成的附加内容中保留的前缀",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [
+      "[Related Knowledge Base Results]:",
+      "<Quoted Message>"
+    ]
+  },
+  "switch_command": {
+    "description": "群主或管理员的开关命令",
+    "type": "string",
+    "default": "/机器人"
+  },
+  "allow_tools": {
+    "description": "是否把 AstrBot 的工具交给模型",
+    "type": "bool",
+    "default": false
+  },
+  "cooldown_seconds": {
+    "description": "每个用户的提问冷却秒数",
+    "type": "float",
+    "default": 3.0
+  },
+  "max_concurrency": {
+    "description": "模型请求的最大并发数",
+    "type": "int",
+    "default": 4
+  },
+  "queue_timeout_seconds": {
+    "description": "并发队列等待秒数",
+    "type": "float",
+    "default": 5.0
+  },
+  "history_ttl_seconds": {
+    "description": "无互动后上下文过期秒数",
+    "type": "int",
+    "default": 600
+  },
+  "history_max_turns": {
+    "description": "每个用户保留的最大对话轮数",
+    "type": "int",
+    "default": 6
+  },
+  "history_max_chars": {
+    "description": "每个用户历史上下文最大字符数",
+    "type": "int",
+    "default": 8000
+  },
+  "max_input_chars": {
+    "description": "单次文字输入最大字符数",
+    "type": "int",
+    "default": 4000
+  },
+  "max_images": {
+    "description": "单次最多分析的图片数",
+    "type": "int",
+    "default": 3
+  },
+  "max_image_bytes": {
+    "description": "单张图片最大字节数",
+    "type": "int",
+    "default": 8388608
+  },
+  "max_total_image_bytes": {
+    "description": "单次图片总字节数上限",
+    "type": "int",
+    "default": 16777216
+  },
+  "security_refusal_message": {
+    "description": "高危请求的拒绝提示",
+    "type": "string",
+    "default": "这个不行哈 跑命令、执行代码、帮忙搞攻击这类我都不碰"
+  },
+  "too_many_images_message": {
+    "description": "图片超过上限的提示，{max_images} 会替换为上限",
+    "type": "string",
+    "default": "图太多了 一次最多 {max_images} 张"
+  },
+  "image_too_large_message": {
+    "description": "图片过大的提示",
+    "type": "string",
+    "default": "图太大了 压缩一下再发"
+  },
+  "empty_mention_message": {
+    "description": "只 @ 她但没有内容的提示",
+    "type": "string",
+    "default": "@我 倒是说点啥啊"
+  },
+  "cooldown_message": {
+    "description": "冷却中的提示，{seconds} 会替换为剩余秒数",
+    "type": "string",
+    "default": "慢点慢点 {seconds} 秒后再问"
+  },
+  "queue_busy_message": {
+    "description": "并发排队超时的提示",
+    "type": "string",
+    "default": "问的人有点多 等会儿再来"
+  },
+  "model_error_message": {
+    "description": "模型返回错误时的提示",
+    "type": "string",
+    "default": "模型那边抽风了 等会儿再问吧"
+  },
+  "empty_reply_message": {
+    "description": "模型回复整理后为空时的提示",
+    "type": "string",
+    "default": "刚才卡住了没想出来 再问一次试试"
+  },
+  "persona_error_message": {
+    "description": "AstrBot 人格的模型出错提示",
+    "type": "string",
+    "default": "模型服务暂时不可用，请稍后重试"
+  },
+  "switch_save_failed_message": {
+    "description": "开关状态保存失败的提示",
+    "type": "string",
+    "default": "机器人回复设置保存失败，请稍后重试"
+  },
+  "switch_disabled_note": {
+    "description": "关闭回复后追加在提示下一行的说明，留空则不追加",
+    "type": "string",
+    "default": ""
+  },
+  "emotion": {
+    "description": "开启情绪、心情和对人的好感",
+    "type": "bool",
+    "default": true
+  },
+  "temper_flare": {
+    "description": "易炸毛程度：被冲撞时情绪和好感的下降倍数（1 为正常）",
+    "type": "float",
+    "default": 1.0
+  },
+  "temper_grudge": {
+    "description": "记仇程度 0 到 1：越大，对人的生气和委屈消散越慢",
+    "type": "float",
+    "default": 0.3
+  },
+  "temper_soften": {
+    "description": "心软程度：好感为负时，对方示好的恢复倍数（一次最多回到 0）；好感不低于 0 时按普通步长增长",
+    "type": "float",
+    "default": 2.0
+  },
+  "emotion_half_life_minutes": {
+    "description": "具体情绪的半衰期（分钟）",
+    "type": "float",
+    "default": 90.0
+  },
+  "mood_half_life_hours": {
+    "description": "背景心情回到基线的半衰期（小时）",
+    "type": "float",
+    "default": 12.0
+  },
+  "mood_baseline_valence": {
+    "description": "心情基线：好坏，-1 到 1",
+    "type": "float",
+    "default": 0.2
+  },
+  "mood_baseline_arousal": {
+    "description": "心情基线：激动程度，0 到 1",
+    "type": "float",
+    "default": 0.3
+  },
+  "affinity_fade_days": {
+    "description": "好感向中性淡化的半衰期（天）",
+    "type": "float",
+    "default": 14.0
+  },
+  "affinity_floor": {
+    "description": "好感下限（-100 到 0）",
+    "type": "float",
+    "default": -60.0
+  },
+  "affinity_step": {
+    "description": "好感每档变化的分数",
+    "type": "float",
+    "default": 4.0
+  },
+  "insult_penalty": {
+    "description": "当面骂她时好感的扣分",
+    "type": "float",
+    "default": 12.0
+  },
+  "ignored_minutes": {
+    "description": "她主动说的话多少分钟没人接就失落，0 为关闭",
+    "type": "int",
+    "default": 15
+  },
+  "vent_affinity": {
+    "description": "好感达到多少算关系好，心情差时可以对他吐苦水",
+    "type": "float",
+    "default": 30.0
+  },
+  "memory": {
+    "description": "开启记忆：聊天时记草稿、深夜整理、遗忘",
+    "type": "bool",
+    "default": true
+  },
+  "memory_half_life_days": {
+    "description": "记忆强度半衰期（天），常被提起的记得更久",
+    "type": "float",
+    "default": 30.0
+  },
+  "memory_reinforce": {
+    "description": "被再次提起时记忆强度的增加量",
+    "type": "float",
+    "default": 1.0
+  },
+  "memory_forget_threshold": {
+    "description": "强度低于此值的记忆被遗忘删除",
+    "type": "float",
+    "default": 0.15
+  },
+  "memory_prompt_people": {
+    "description": "每次回复最多带几个在场的人的记忆",
+    "type": "int",
+    "default": 4
+  },
+  "memory_prompt_per_person": {
+    "description": "每个人最多带几条记忆",
+    "type": "int",
+    "default": 5
+  },
+  "forget_command": {
+    "description": "群友发这句话，她就删掉关于这个人的印象、好感、记忆、相关情绪和未整理的聊天记录（已写成的日记不改）；留空关闭",
+    "type": "string",
+    "default": "/忘掉我"
+  },
+  "forget_done_message": {
+    "description": "执行「忘掉我」后的回复",
+    "type": "string",
+    "default": "好 关于你的事我都忘了"
+  },
+  "person_keep_days": {
+    "description": "超过这么多天没和她说过话的群友，夜间任务删掉关于他的全部记录（同「忘掉我」）；0 表示不按天数删除",
+    "type": "int",
+    "default": 0
+  },
+  "consolidation": {
+    "description": "开启深夜整理：核对草稿、合并、更新印象，然后清空当天聊天记录",
+    "type": "bool",
+    "default": true
+  },
+  "consolidation_time": {
+    "description": "深夜整理和写日记的时间，HH:MM，按 timezone",
+    "type": "string",
+    "default": "04:00"
+  },
+  "background_provider_id": {
+    "description": "后台调用（插话判断、主动开话题、整理记忆、日记、日程）用的提供商 ID，留空用聊天模型；聊天模型开了原生搜索时建议另配一个不带搜索的，更快更稳",
+    "type": "string",
+    "default": ""
+  },
+  "consolidation_max_chars": {
+    "description": "整理时最多读多少字的当天聊天记录",
+    "type": "int",
+    "default": 24000
+  },
+  "diary": {
+    "description": "开启日记：每日、每周一、每月 1 号",
+    "type": "bool",
+    "default": true
+  },
+  "diary_recall_days": {
+    "description": "回忆时读最近几天的日记原文，更早的读周记月记",
+    "type": "int",
+    "default": 3
+  },
+  "diary_prompt_chars": {
+    "description": "每次回复带的日记摘要最多字数",
+    "type": "int",
+    "default": 1200
+  },
+  "diary_keep_daily_days": {
+    "description": "日记原文保留天数，0 为永久",
+    "type": "int",
+    "default": 30
+  },
+  "diary_keep_weekly_days": {
+    "description": "周记保留天数，0 为永久（月记永久保留）",
+    "type": "int",
+    "default": 180
+  },
+  "schedule": {
+    "description": "开启每日日程",
+    "type": "bool",
+    "default": true
+  },
+  "schedule_hour": {
+    "description": "每天几点以后生成当天日程",
+    "type": "int",
+    "default": 6
+  },
+  "weather": {
+    "description": "开启真实天气",
+    "type": "bool",
+    "default": true
+  },
+  "weather_refresh_minutes": {
+    "description": "天气刷新间隔（分钟）",
+    "type": "int",
+    "default": 180
+  },
+  "news": {
+    "description": "开启新闻抓取，作为她刷到的素材",
+    "type": "bool",
+    "default": true
+  },
+  "news_interval_minutes": {
+    "description": "新闻抓取间隔（分钟）",
+    "type": "int",
+    "default": 120
+  },
+  "news_per_feed": {
+    "description": "每个来源每次取几条",
+    "type": "int",
+    "default": 5
+  },
+  "news_keep_days": {
+    "description": "新闻保留天数",
+    "type": "int",
+    "default": 7
+  },
+  "news_feeds": {
+    "description": "新闻源 RSS/Atom 地址，留空用内置的科技和娱乐生活来源",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "news_blocked_terms": {
+    "description": "额外的新闻屏蔽词，命中标题或摘要的丢弃（内置政治、战争、灾祸等词表始终生效）",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "holiday_url": {
+    "description": "节假日数据地址模板，{year} 为年份",
+    "type": "string",
+    "default": "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json"
+  },
+  "city_name": {
+    "description": "她住的城市名，用于日程",
+    "type": "string",
+    "default": "上海"
+  },
+  "latitude": {
+    "description": "城市纬度",
+    "type": "float",
+    "default": 31.23
+  },
+  "longitude": {
+    "description": "城市经度",
+    "type": "float",
+    "default": 121.47
+  },
+  "timezone": {
+    "description": "时区，用于日程、天气和整理时间",
+    "type": "string",
+    "default": "Asia/Shanghai"
+  },
+  "proactive": {
+    "description": "开启主动开话题：群里安静时由她看气氛决定要不要说",
+    "type": "bool",
+    "default": true
+  },
+  "proactive_daily_cap": {
+    "description": "每个群每天最多主动开几次话题",
+    "type": "int",
+    "default": 6
+  },
+  "proactive_min_energy": {
+    "description": "兴致低于此值不主动开话题",
+    "type": "float",
+    "default": 40.0
+  },
+  "proactive_quiet_minutes": {
+    "description": "群里至少安静多少分钟才考虑开话题",
+    "type": "int",
+    "default": 15
+  },
+  "proactive_min_gap_minutes": {
+    "description": "两次考虑开话题之间至少间隔多少分钟",
+    "type": "int",
+    "default": 45
+  },
+  "tools": {
+    "description": "把 allowed_tools 里的 AstrBot 工具（经核心拦截层包装）交给模型自己调用",
+    "type": "bool",
+    "default": false
+  },
+  "allowed_tools": {
+    "description": "允许模型调用的工具名",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "tool_daily_limits": {
+    "description": "各工具每天最多调用次数，JSON 对象，键为工具名，如 {\"image_generate\": 5}",
+    "type": "text",
+    "default": "{}"
+  },
+  "tool_blocked_terms": {
+    "description": "额外的工具参数屏蔽词（内置未成年、露骨、血腥、违法、极端主义、政治人物词表始终生效）",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "draw": {
+    "description": "开启她自己决定画图：回复里的内部标记带画面描述时，由核心经拦截层调用生图工具",
+    "type": "bool",
+    "default": false
+  },
+  "draw_tool_name": {
+    "description": "生图工具名",
+    "type": "string",
+    "default": "image_generate"
+  },
+  "draw_tool_arguments": {
+    "description": "调用生图工具时固定附带的参数，JSON 对象，如 {\"quality\": \"low\", \"size\": \"1024x1024\"}",
+    "type": "text",
+    "default": "{}"
+  },
+  "draw_daily_limit": {
+    "description": "每天最多画几张",
+    "type": "int",
+    "default": 5
+  },
+  "vision": {
+    "description": "让闲聊判断也看到群里的图片（表情包、截图）",
+    "type": "bool",
+    "default": true
+  },
+  "search_rules": {
+    "description": "加入联网搜索规则提示词（需要提供商自己开启原生搜索）",
+    "type": "bool",
+    "default": true
+  },
+  "burst": {
+    "description": "开启闲聊多条连发",
+    "type": "bool",
+    "default": true
+  },
+  "burst_max_messages": {
+    "description": "一次最多连发几条",
+    "type": "int",
+    "default": 4
+  },
+  "burst_chars_per_second": {
+    "description": "连发时模拟的打字速度（字/秒）",
+    "type": "float",
+    "default": 6.0
+  }
+}
