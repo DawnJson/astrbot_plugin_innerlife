@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS chat_log (
   text TEXT NOT NULL,
   at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS night_jobs (
+  day TEXT NOT NULL,
+  step TEXT NOT NULL,                       -- consolidate / daily / weekly / monthly, then complete
+  PRIMARY KEY (day, step)
+);
+CREATE TABLE IF NOT EXISTS tool_usage (
+  day TEXT NOT NULL,
+  name TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  PRIMARY KEY (day, name)
+);
+CREATE TABLE IF NOT EXISTS disabled_groups (
+  group_id TEXT PRIMARY KEY
+);
 CREATE INDEX IF NOT EXISTS memories_user ON memories (user_id);
 CREATE INDEX IF NOT EXISTS emotions_created ON emotions (created_at);
 CREATE INDEX IF NOT EXISTS chat_log_at ON chat_log (at);
@@ -113,10 +127,6 @@ class Store:
     # people
     def person(self, user_id: str) -> sqlite3.Row | None:
         return self._one("SELECT * FROM people WHERE user_id=?", (user_id,))
-
-    def people(self, user_ids: list[str]) -> list[sqlite3.Row]:
-        marks = ",".join("?" * len(user_ids))
-        return self._all(f"SELECT * FROM people WHERE user_id IN ({marks})", user_ids)
 
     def save_person(
         self, user_id: str, name: str, affinity: float, impression: str, now: float
@@ -318,3 +328,43 @@ class Store:
 
     def purge_chat_log(self, up_to: float) -> None:
         self._run("DELETE FROM chat_log WHERE at<=?", (up_to,))
+
+    # night job progress
+    def night_steps(self, day: str) -> set[str]:
+        return {row["step"] for row in self._all("SELECT step FROM night_jobs WHERE day=?", (day,))}
+
+    def mark_night_step(self, day: str, step: str) -> None:
+        self._run("INSERT OR IGNORE INTO night_jobs (day,step) VALUES (?,?)", (day, step))
+
+    def delete_night_before(self, day: str) -> None:
+        self._run("DELETE FROM night_jobs WHERE day<?", (day,))
+
+    # tool usage
+    def tool_uses(self, day: str, name: str) -> int:
+        row = self._one("SELECT count FROM tool_usage WHERE day=? AND name=?", (day, name))
+        return row["count"] if row else 0
+
+    def add_tool_use(self, day: str, name: str) -> None:
+        """Count one use today; earlier days are dropped."""
+        with self._db() as db:
+            db.execute("DELETE FROM tool_usage WHERE day<?", (day,))
+            db.execute(
+                "INSERT INTO tool_usage (day,name,count) VALUES (?,?,1)"
+                " ON CONFLICT(day,name) DO UPDATE SET count=count+1",
+                (day, name),
+            )
+
+    # reply switch
+    def group_enabled(self, group_id: str) -> bool:
+        return self._one("SELECT 1 FROM disabled_groups WHERE group_id=?", (group_id,)) is None
+
+    def set_group_enabled(self, group_id: str, enabled: bool) -> bool:
+        """Turn her replies in a group on or off; True when that changed anything."""
+        with self._db() as db:
+            if enabled:
+                cursor = db.execute("DELETE FROM disabled_groups WHERE group_id=?", (group_id,))
+            else:
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO disabled_groups (group_id) VALUES (?)", (group_id,)
+                )
+            return cursor.rowcount > 0

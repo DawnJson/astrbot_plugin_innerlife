@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import html
-import logging
 import re
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -13,33 +12,12 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; innerlife)"}
 TITLE_LIMIT = 80
 SUMMARY_LIMIT = 160
 RAIN_CHANCE = 50
-
-DEFAULT_NEWS_FEEDS = [
-    "https://www.ithome.com/rss/",
-    "https://sspai.com/feed",
-    "https://www.ifanr.com/feed",
-    "https://www.gcores.com/rss",
-    "https://www.yystv.cn/rss/feed",
-    "https://www.douban.com/feed/review/movie",
-    "https://feeds.appinn.com/appinns/",
-]
-
-DEFAULT_NEWS_BLOCKED_TERMS = [
-    "政治", "政府", "外交", "总统", "总理", "国务院", "两会", "选举",
-    "制裁", "关税", "贸易战", "军方", "军队", "军事", "战火", "战场", "导弹", "空袭", "俄乌",
-    "乌克兰", "俄罗斯", "以色列", "巴勒斯坦", "加沙", "台海", "台独", "南海", "朝鲜",
-    "恐怖", "袭击", "爆炸", "枪击", "枪杀", "杀害", "谋杀", "遇难", "身亡", "自杀",
-    "犯罪", "逮捕", "拘留", "判刑", "诈骗", "涉嫌", "性侵", "猥亵", "强奸", "贩毒",
-    "地震", "海啸", "洪灾", "洪水", "台风", "火灾", "坠机", "空难", "矿难", "疫情", "新冠",
-    "trump", "biden", "putin", "congress", "sanction", "war on", "airstrike", "terror", "shooting",
-    "murder", "killed",
-]
 
 WMO_CODES = {
     0: "晴", 1: "晴间多云", 2: "多云", 3: "阴",

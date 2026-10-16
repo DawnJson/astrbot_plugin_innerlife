@@ -1,36 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
+import datetime
+import inspect
 import os
-import sys
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
+
+import support
+from mcp.types import CallToolResult, ImageContent
 
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core.agent.message import TextPart
-from astrbot.core.agent.tool import ToolSet
+from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.message.message_event_result import (
     MessageEventResult,
     ResultContentType,
 )
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from astrbot.core.provider.func_tool_manager import FunctionToolManager
 
 import astrbot_plugin_innerlife.main as main_module
+from astrbot_plugin_innerlife import diary, memory
 from astrbot_plugin_innerlife.main import (
-    _MESSAGE_SEQ_KEY,
+    _CHAT_ENTRY_KEY,
     _PROACTIVE_ANSWER_KEY,
     _REQUEST_TEXT_KEY,
     InnerlifeChatterFilter,
-    InnerlifeForgetFilter,
-    InnerlifeReplySwitchFilter,
     Main,
     _event_request_text,
 )
 from astrbot_plugin_innerlife.proactive_chat import ASK
-from astrbot_plugin_innerlife.reply_switch import ReplySwitch
 
 
 BOT_ID = "100000001"
@@ -155,15 +160,17 @@ class FakeEvent:
 
 
 def make_main(**overrides) -> Main:
-    config = {
-        "group_ids": [GROUP_ID],
-        "allowed_link_domains": ["example.com"],
-        "secret_env_vars": [SECRET_ENV],
-        "persona_prompt": "测试人设",
-        "bot_names": ["小测"],
-        "support_scope": "测试范围",
-        **overrides,
-    }
+    config = support.make_config(
+        **{
+            "group_ids": [GROUP_ID],
+            "allowed_link_domains": ["example.com"],
+            "secret_env_vars": [SECRET_ENV],
+            "persona_prompt": "测试人设",
+            "bot_names": ["小测"],
+            "support_scope": "测试范围",
+            **overrides,
+        }
+    )
     return Main(SimpleNamespace(), config)
 
 
@@ -182,59 +189,81 @@ async def run_request(instance: Main, event: FakeEvent, request: ProviderRequest
     await instance.secure_model_request(event, request)
     if event.stopped:
         return
-    request.system_prompt += "\n\n功能插件提示词 <kb-used>none</kb-used>"
+    request.system_prompt += "\n\n【功能插件】提示词 <kb-used>none</kb-used>"
     request.extra_user_content_parts.append(
-        TextPart(text=f"功能插件数据 password={SECRET}").mark_as_temp()
+        TextPart(text=f"功能插件数据 password={SECRET}")
     )
     await instance.apply_persona(event, request)
 
 
-def test_scope_filters() -> None:
-    instance = make_main()
-    switch_filter = InnerlifeReplySwitchFilter()
-    chatter_filter = InnerlifeChatterFilter()
+def stateful(directory: str, **overrides) -> Main:
+    instance = make_main(**overrides)
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    instance._init_store(Path(directory))
+    main_module.typing_delay = lambda *args: 0.0
+    return instance
 
-    assert switch_filter.filter(FakeEvent("/机器人 关闭"), {})
-    assert not switch_filter.filter(FakeEvent("请关闭机器人"), {})
-    assert not switch_filter.filter(FakeEvent("/机器人 关闭", group_id="999"), {})
-    assert not switch_filter.filter(FakeEvent("/机器人 关闭", platform="telegram"), {})
-    assert not switch_filter.filter(FakeEvent("/机器人 关闭", group_id=""), {})
+
+def chain_texts(message) -> str:
+    return "".join(c.text for c in message.chain if isinstance(c, main_module.Plain))
+
+
+def has_image(event: FakeEvent) -> bool:
+    return any(isinstance(c, main_module.Image) for m in event.sent for c in m.chain)
+
+
+def test_scope_filters() -> None:
+    chatter_filter = InnerlifeChatterFilter()
+    make_main()
 
     assert chatter_filter.filter(FakeEvent("闲聊"), {})
     assert not chatter_filter.filter(FakeEvent("闲聊", sender_id=BOT_ID), {})
     assert not chatter_filter.filter(FakeEvent("闲聊", group_id="999"), {})
+    assert not chatter_filter.filter(FakeEvent("闲聊", group_id=""), {})
+    assert not chatter_filter.filter(FakeEvent("闲聊", platform="telegram"), {})
     assert not chatter_filter.filter(FakeEvent("闲聊", post_type="notice"), {})
 
-    make_main(group_ids=[], switch_command="/小助手")
+    make_main(group_ids=[])
     assert chatter_filter.filter(FakeEvent("闲聊", group_id="999"), {})
     assert not chatter_filter.filter(FakeEvent("闲聊", group_id=""), {})
-    assert switch_filter.filter(FakeEvent("/小助手 开启", group_id="999"), {})
-    assert not switch_filter.filter(FakeEvent("/机器人 开启"), {})
     try:
         make_main(group_ids=["abc"])
     except ValueError:
         pass
     else:
         raise AssertionError("non-numeric group id accepted")
-    del instance
-    print("PASS policy: filters follow group_ids (empty = all groups) and switch_command")
+    make_main()
+    print("PASS policy: the chatter filter follows group_ids (empty = all groups)")
+
+
+def test_public_interface_is_stable() -> None:
+    instance = make_main()
+    assert instance.bot_names == ["小测"]
+    assert inspect.iscoroutinefunction(Main.note_signal)
+    assert not inspect.iscoroutinefunction(Main.note_bot_message)
+    assert list(inspect.signature(Main.note_signal).parameters) == ["self", "event", "signal"]
+    assert list(inspect.signature(Main.note_bot_message).parameters) == ["self", "group_id", "text"]
+    print("PASS policy: note_signal, note_bot_message and bot_names keep their shape")
 
 
 async def test_reply_switch_permissions_and_gating() -> None:
-    with tempfile.TemporaryDirectory() as temporary_directory:
-        instance = make_main(switch_disabled_note="附加说明")
-        switch = ReplySwitch(Path(temporary_directory) / "reply_switch.json")
-        instance._reply_switch = switch
+    with tempfile.TemporaryDirectory() as directory:
+        instance = stateful(directory, switch_disabled_note="附加说明")
+        store = instance.store
+
+        chat = FakeEvent("普通消息")
+        assert [reply async for reply in instance.handle_reply_switch(chat)] == []
+        assert not chat.stopped
 
         denied_event = FakeEvent("/机器人 关闭", role="member")
         denied = [reply async for reply in instance.handle_reply_switch(denied_event)]
         assert denied_event.stopped and denied == []
-        assert switch.is_enabled(GROUP_ID)
+        assert store.group_enabled(GROUP_ID)
 
         closed_event = FakeEvent("/机器人 关闭", role="admin")
         closed = [reply async for reply in instance.handle_reply_switch(closed_event)]
         assert closed == ["本群机器人回复已关闭\n附加说明"], closed
-        assert not switch.is_enabled(GROUP_ID)
+        assert not store.group_enabled(GROUP_ID)
         again = [
             reply
             async for reply in instance.handle_reply_switch(
@@ -250,6 +279,10 @@ async def test_reply_switch_permissions_and_gating() -> None:
         await instance.secure_model_request(request_event, ProviderRequest(prompt="普通问题"))
         assert request_event.stopped
 
+        # The switch is in the db: a restart keeps it.
+        reborn = stateful(directory, switch_disabled_note="附加说明")
+        assert not reborn.store.group_enabled(GROUP_ID)
+
         opened = [
             reply
             async for reply in instance.handle_reply_switch(
@@ -257,34 +290,52 @@ async def test_reply_switch_permissions_and_gating() -> None:
             )
         ]
         assert opened == ["本群机器人回复已开启"], opened
-        assert switch.is_enabled(GROUP_ID)
+        assert store.group_enabled(GROUP_ID)
 
-        plain = make_main()
-        plain._reply_switch = switch
-        await switch.set_enabled(GROUP_ID, False)
+        plain = stateful(directory + "/plain")
+        plain.store.set_group_enabled(GROUP_ID, False)
         replies = [
             reply
             async for reply in plain.handle_reply_switch(FakeEvent("/机器人 关闭", role="admin"))
         ]
         assert replies == ["本群机器人回复已关闭，当前已经是该状态"], replies
-    print("PASS policy: switch needs owner/admin, gates the model, note is configurable")
+
+        broken = stateful(directory + "/broken")
+        broken.store.set_group_enabled = mock.Mock(side_effect=sqlite3.OperationalError("locked"))
+        failed = [
+            reply
+            async for reply in broken.handle_reply_switch(FakeEvent("/机器人 关闭", role="admin"))
+        ]
+        assert failed == [main_module.SWITCH_SAVE_FAILED_MESSAGE], failed
+
+        renamed = stateful(directory + "/renamed", group_ids=[], switch_command="/小助手")
+        reply = [
+            r
+            async for r in renamed.handle_reply_switch(
+                FakeEvent("/小助手 开启", group_id="999", role="admin")
+            )
+        ]
+        assert reply == ["本群机器人回复已开启，当前已经是该状态"], reply
+        old = FakeEvent("/机器人 开启", role="admin")
+        assert [r async for r in renamed.handle_reply_switch(old)] == [] and not old.stopped
+    make_main()
+    print("PASS policy: switch needs owner/admin, lives in the db, gates the model, note is configurable")
 
 
 async def test_forget_me() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory)
-        forget_filter = InnerlifeForgetFilter()
-        assert forget_filter.filter(FakeEvent("/忘掉我", messages=[]), {})
-        assert not forget_filter.filter(FakeEvent("你忘掉我吧", messages=[]), {})
-        assert not forget_filter.filter(FakeEvent("/忘掉我", sender_id=BOT_ID), {})
-        assert not forget_filter.filter(FakeEvent("/忘掉我", group_id="999"), {})
-
         store, now = instance.store, time.time()
         for user_id in ("u1", "u2"):
             store.save_person(user_id, f"昵称{user_id}", 40.0, "印象", now)
             store.add_memory(user_id, GROUP_ID, "在准备考研", False, now)
             store.add_emotion("生气", user_id, 0.8, "抬杠", now)
             store.log_line(GROUP_ID, user_id, f"昵称{user_id}", "你好", now)
+
+        chat = FakeEvent("你忘掉我吧", sender_id="u1", messages=[])
+        assert [reply async for reply in instance.handle_forget(chat)] == []
+        assert not chat.stopped and store.person("u1") is not None
+
         event = FakeEvent("/忘掉我", sender_id="u1", messages=[])
         replies = [reply async for reply in instance.handle_forget(event)]
         assert event.stopped and replies == ["好 关于你的事我都忘了"], replies
@@ -293,8 +344,11 @@ async def test_forget_me() -> None:
         assert [row["user_id"] for row in store.chat_log()] == ["u2"]
         assert store.person("u2") is not None and len(store.memories_of("u2")) == 1
 
-    make_main(forget_command="")
-    assert not forget_filter.filter(FakeEvent("/忘掉我", messages=[]), {})
+        off = stateful(directory + "/off", forget_command="")
+        off.store.save_person("u1", "昵称u1", 40.0, "印象", now)
+        silent = FakeEvent("/忘掉我", sender_id="u1", messages=[])
+        assert [reply async for reply in off.handle_forget(silent)] == [] and not silent.stopped
+        assert off.store.person("u1") is not None
     make_main()
     print("PASS policy: 忘掉我 deletes only the sender's records; empty command turns it off")
 
@@ -309,16 +363,23 @@ async def test_persona_is_created_or_updated() -> None:
         assert (called, persona_id) == (action, "测试人格")
         assert kwargs["system_prompt"] == instance.safety_prompt + "\n\n测试人设"
         assert kwargs["tools"] == [] and kwargs["skills"] == []
-        assert kwargs["custom_error_message"] == "模型服务暂时不可用，请稍后重试"
-    print("PASS policy: persona = safety prompt + persona, no tools")
+        assert kwargs["custom_error_message"] == "模型那边抽风了 等会儿再问吧"
+    print("PASS policy: persona = safety prompt + persona, no tools, error text from model_error_message")
 
 
-def test_safety_prompt_link_rule() -> None:
-    assert "5. 回复中只能输出 example.com 及其子域名的 HTTPS 链接，不得输出其他域名链接。" in (
-        make_main().safety_prompt
-    )
+def test_safety_prompt_link_rule_and_no_business_words() -> None:
+    prompt = make_main().safety_prompt
+    assert "5. 回复中只能输出 example.com 及其子域名的 HTTPS 链接，不得输出其他域名链接。" in prompt
     assert "5. 回复中不得输出任何链接。" in make_main(allowed_link_domains=[]).safety_prompt
-    print("PASS policy: link rule follows allowed_link_domains")
+    assert "部署方提供的资料" in prompt and "附加资料" in prompt
+    framework_prompts = prompt + main_module.SEARCH_RULES + main_module.TOPIC_PROMPT + main_module.JAB_PROMPT
+    for business in ("重活", "按回答范围", "文档候选", "实时渠"):
+        assert business not in framework_prompts, business
+    assert "部署方资料优先" in main_module.SEARCH_RULES
+    assert "刚发了通知" in main_module.TOPIC_PROMPT and "那句话已经被处理了" in main_module.JAB_PROMPT
+    assert "不得声称自己能联网" in prompt
+    assert "不得声称自己能联网" not in make_main(search_rules=True).safety_prompt
+    print("PASS policy: link rule follows allowed_link_domains; the framework prompts carry no deployment business")
 
 
 async def test_expiry() -> None:
@@ -351,7 +412,7 @@ async def test_waiting_guard() -> None:
 
     # Only an explicit @ (or a judged ASK) may reach the model.
     quoted_bot = main_module.Reply(id="1", sender_id=BOT_ID, chain=[])
-    quote_only = FakeEvent("渠道返回 429 怎么办", messages=[quoted_bot])
+    quote_only = FakeEvent("接口返回 429 怎么办", messages=[quoted_bot])
     await instance.guard_waiting_request(quote_only)
     assert quote_only.stopped and quote_only.sent == []
 
@@ -385,7 +446,7 @@ async def test_waiting_guard() -> None:
     ]
     many = FakeEvent("看图", messages=images)
     await instance.guard_waiting_request(many)
-    assert many.stopped and many.sent_text() == ["图太多了 一次最多 3 张"]
+    assert many.stopped and many.sent_text() == ["图太多或太大了 一次最多 3 张 压缩一下再发"]
 
     empty = FakeEvent("  ")
     await instance.guard_waiting_request(empty)
@@ -397,7 +458,7 @@ async def test_waiting_guard() -> None:
     assert SECRET not in leaky.get_message_str()
     assert SECRET not in leaky.get_extra(_REQUEST_TEXT_KEY)
 
-    instance.cooldown_seconds = 3.0
+    instance.s = dataclasses.replace(instance.s, cooldown_seconds=3.0)
     first = FakeEvent("第一问", sender_id="cool-user")
     await instance.guard_waiting_request(first)
     assert not first.stopped
@@ -422,7 +483,7 @@ def test_quoted_text_is_part_of_the_request_text() -> None:
 
 async def test_request_policy_at_300_and_0() -> None:
     os.environ[SECRET_ENV] = SECRET
-    instance = make_main()
+    instance = make_main(search_rules=True)
     event = FakeEvent()
     request = ProviderRequest(
         prompt=f"怎么配置？password={SECRET}",
@@ -450,13 +511,13 @@ async def test_request_policy_at_300_and_0() -> None:
     ]
     assert not event.get_extra(main_module._SLOT_HELD_KEY, False)
 
-    request.system_prompt += "\n\n功能插件提示词"
+    request.system_prompt += "\n\n【功能插件】提示词"
     request.extra_user_content_parts.append(
-        TextPart(text=f"功能插件数据 password={SECRET}").mark_as_temp()
+        TextPart(text=f"功能插件数据 password={SECRET}")
     )
     await instance.apply_persona(event, request)
     assert request.system_prompt.startswith(
-        instance.safety_prompt + "\n\n功能插件提示词\n\n测试人设\n\n"
+        instance.safety_prompt + "\n\n【功能插件】提示词\n\n测试人设\n\n"
     )
     assert "<il>" in request.system_prompt and "【联网搜索】" in request.system_prompt
     assert len(request.extra_user_content_parts) == 3
@@ -470,16 +531,19 @@ async def test_request_policy_at_300_and_0() -> None:
     await asyncio.sleep(0)
     assert not event.get_extra(main_module._SLOT_HELD_KEY)
 
-    tools = ToolSet()
-    allowed = make_main(allow_tools=True)
+    # Whatever tools AstrBot offered are replaced by an empty set.
+    offered = ToolSet()
+    offered.add_tool(
+        FunctionTool(name="shell", description="d", parameters={"type": "object", "properties": {}})
+    )
     tool_request = ProviderRequest(prompt="用工具")
-    tool_request.func_tool = tools
+    tool_request.func_tool = offered
     tool_event = FakeEvent()
-    await run_request(allowed, tool_event, tool_request)
-    assert tool_request.func_tool is tools
-    allowed._release_slot(tool_event)
+    await run_request(instance, tool_event, tool_request)
+    assert isinstance(tool_request.func_tool, ToolSet) and tool_request.func_tool.names() == []
+    instance._release_slot(tool_event)
     await asyncio.sleep(0)
-    print("PASS policy: 300 resets prompt and trims extras; 0 adds persona, no tools")
+    print("PASS policy: 300 resets prompt and trims extras; 0 adds persona and always removes tools")
 
 
 async def test_request_limits() -> None:
@@ -499,21 +563,26 @@ async def test_request_limits() -> None:
     await instance.secure_model_request(hidden_risk_event, hidden_risk)
     assert hidden_risk_event.stopped
 
+    limit_message = "图太多或太大了 一次最多 3 张 压缩一下再发"
     many_event = FakeEvent()
     many = ProviderRequest(prompt="看图", image_urls=["base64://x"] * 4)
     await instance.secure_model_request(many_event, many)
-    assert many_event.stopped and many_event.sent_text() == ["图太多了 一次最多 3 张"]
+    assert many_event.stopped and many_event.sent_text() == [limit_message]
 
     large_event = FakeEvent()
     large = ProviderRequest(prompt="看图", image_urls=["base64://" + "A" * (12 * 1024 * 1024)])
     await instance.secure_model_request(large_event, large)
-    assert large_event.stopped and large_event.sent_text() == ["图太大了 压缩一下再发"]
+    assert large_event.stopped and large_event.sent_text() == [limit_message]
 
-    queue = make_main(max_concurrency=1, queue_timeout_seconds=0.1)
-    holder = FakeEvent()
-    await run_request(queue, holder, ProviderRequest(prompt="占着"))
-    blocked = FakeEvent()
-    await run_request(queue, blocked, ProviderRequest(prompt="排队"))
+    queue = make_main(max_concurrency=1)
+    main_module.QUEUE_TIMEOUT_SECONDS = 0.1
+    try:
+        holder = FakeEvent()
+        await run_request(queue, holder, ProviderRequest(prompt="占着"))
+        blocked = FakeEvent()
+        await run_request(queue, blocked, ProviderRequest(prompt="排队"))
+    finally:
+        main_module.QUEUE_TIMEOUT_SECONDS = 5.0
     assert blocked.stopped and blocked.sent_text() == ["问的人有点多 等会儿再来"]
     assert not blocked.get_extra(main_module._SLOT_HELD_KEY, False)
     queue._release_slot(holder)
@@ -544,9 +613,10 @@ async def test_response_finalize_and_slot_release() -> None:
     assert "other.test" not in response.completion_text
     assert not event.get_extra(main_module._SLOT_HELD_KEY)
 
+    # An empty reply and a model error read the same to the group.
     empty = LLMResponse(role="assistant", completion_text=" 。 ")
     await instance.secure_model_response(FakeEvent(), empty)
-    assert empty.completion_text == "刚才卡住了没想出来 再问一次试试"
+    assert empty.completion_text == "模型那边抽风了 等会儿再问吧"
     failed = LLMResponse(role="err", completion_text="boom")
     await instance.secure_model_response(FakeEvent(), failed)
     assert failed.completion_text == "模型那边抽风了 等会儿再问吧"
@@ -557,12 +627,15 @@ async def test_response_finalize_and_slot_release() -> None:
 async def test_decorated_result_at_rule() -> None:
     os.environ[SECRET_ENV] = SECRET
     instance = make_main()
+    chat = instance._proactive_chat
 
     async def answer(*, later_member_message: bool, model: bool = True):
         group = FakeEvent("问题", sender_id="asker")
-        await instance.stamp_group_message(group)
+        await instance.handle_group_chatter(group)
         if later_member_message:
-            await instance.stamp_group_message(FakeEvent("别人插话", sender_id="other"))
+            chat.record(
+                GROUP_ID, "别人", "别人插话", time.monotonic(), sender_id="other", awaits_verdict=False
+            )
         text = f"回答 {SECRET}"
         group.set_result(model_result(text) if model else MessageEventResult().message(text))
         await instance.secure_decorated_result(group)
@@ -581,8 +654,8 @@ async def test_decorated_result_at_rule() -> None:
     assert plain_texts(command_reply) == [f"回答 {SECRET}"] and len(command_reply.chain) == 1
 
     reply_event = FakeEvent("问题", sender_id="asker")
-    await instance.stamp_group_message(reply_event)
-    await instance.stamp_group_message(FakeEvent("插话", sender_id="other"))
+    await instance.handle_group_chatter(reply_event)
+    chat.record(GROUP_ID, "别人", "插话", time.monotonic(), sender_id="other", awaits_verdict=False)
     quoted = model_result("带引用")
     quoted.chain.insert(0, main_module.Reply(id="1", chain=[]))
     reply_event.set_result(quoted)
@@ -595,15 +668,15 @@ async def test_decorated_result_at_rule() -> None:
     merged.set_result(parts)
     await instance.secure_decorated_result(merged)
     assert plain_texts(parts) == ["第一段。 第二段"]
-    transcript = instance._proactive_chat.transcript(GROUP_ID, time.monotonic())
-    assert "你：第一段。 第二段" in transcript, transcript
+    last = chat.last_message(GROUP_ID)
+    assert last.speaker == main_module.SELF_SPEAKER and last.text == "第一段。 第二段", last
 
     held = FakeEvent()
     await run_request(instance, held, ProviderRequest(prompt="问题"))
     held.set_result(model_result("好"))
     await instance.secure_decorated_result(held)
     assert not held.get_extra(main_module._SLOT_HELD_KEY)
-    assert _MESSAGE_SEQ_KEY not in held.extra
+    assert _CHAT_ENTRY_KEY not in held.extra
     print("PASS policy: model replies are finalised, recorded, and @ the asker after an interjection")
 
 
@@ -616,7 +689,7 @@ async def test_chatter_judgement() -> None:
         prompts.append((system_prompt, prompt))
         return answers.pop(0)
 
-    instance._quiet_model_call = fake_call
+    instance._model_call = fake_call
 
     groups = iter(range(100, 200))
 
@@ -657,7 +730,7 @@ async def test_chatter_judgement() -> None:
         quiet_prompts.append(prompt)
         return "ASK 1"
 
-    quiet._quiet_model_call = quiet_call
+    quiet._model_call = quiet_call
     entry = quiet._proactive_chat.record(
         GROUP_ID, "甲", "怎么配置", time.monotonic(), sender_id="1", awaits_verdict=True
     )
@@ -670,47 +743,52 @@ async def test_chatter_judgement() -> None:
 
 
 async def test_chatter_wakes_the_model_for_an_open_question() -> None:
-    import astrbot_plugin_innerlife.main as module
-
     instance = make_main()
+    module = main_module
+    saved = module.QUIET_SECONDS, module.ASK_WAIT_ALONE_SECONDS, module.ASK_WAIT_SECONDS
     module.QUIET_SECONDS = 0
     module.ASK_WAIT_ALONE_SECONDS = 0
     module.ASK_WAIT_SECONDS = 0
-    calls: list[str] = []
+    try:
+        calls: list[str] = []
 
-    async def fake_call(system_prompt: str, prompt: str, **_):
-        calls.append(system_prompt)
-        return "OPEN" if system_prompt == module.ANSWERED_CHECK_PROMPT else "ASK 1"
+        async def fake_call(system_prompt: str, prompt: str, **_):
+            calls.append(system_prompt)
+            return "OPEN" if system_prompt == module.ANSWERED_CHECK_PROMPT else "ASK 1"
 
-    instance._quiet_model_call = fake_call
-    asking = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")], sender_id="asker")
-    await instance.handle_group_chatter(asking)
-    assert asking.get_extra(_PROACTIVE_ANSWER_KEY) is True
-    assert asking.is_at_or_wake_command
+        instance._model_call = fake_call
+        asking = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")], sender_id="asker")
+        await instance.handle_group_chatter(asking)
+        assert asking.get_extra(_PROACTIVE_ANSWER_KEY) is True
+        assert asking.is_at_or_wake_command
 
-    mentioned = FakeEvent("@她 在吗")
-    before = len(calls)
-    await instance.handle_group_chatter(mentioned)
-    assert len(calls) == before and not mentioned.get_extra(_PROACTIVE_ANSWER_KEY)
+        mentioned = FakeEvent("@她 在吗")
+        before = len(calls)
+        await instance.handle_group_chatter(mentioned)
+        assert len(calls) == before and not mentioned.get_extra(_PROACTIVE_ANSWER_KEY)
 
-    command = FakeEvent("/其他命令 参数", messages=[main_module.Plain("/其他命令 参数")])
-    await instance.handle_group_chatter(command)
-    assert len(calls) == before
+        command = FakeEvent("/其他命令 参数", messages=[main_module.Plain("/其他命令 参数")])
+        await instance.handle_group_chatter(command)
+        assert len(calls) == before
 
-    disabled = make_main()
-    disabled._reply_switch = SimpleNamespace(is_enabled=lambda _group: False)
-    off = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
-    await disabled.handle_group_chatter(off)
-    assert not off.get_extra(_PROACTIVE_ANSWER_KEY)
-    print("PASS policy: an unanswered ASK wakes the model; @, commands and a closed switch do not")
+        with tempfile.TemporaryDirectory() as directory:
+            disabled = stateful(directory)
+            disabled.store.set_group_enabled(GROUP_ID, False)
+            disabled._model_call = fake_call
+            off = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
+            await disabled.handle_group_chatter(off)
+            assert not off.get_extra(_PROACTIVE_ANSWER_KEY)
+            assert len(calls) == before
 
-
-def stateful(directory: str, **overrides) -> Main:
-    instance = make_main(**overrides)
-    Path(directory).mkdir(parents=True, exist_ok=True)
-    instance._init_store(Path(directory))
-    main_module.typing_delay = lambda *args: 0.0
-    return instance
+        # chatter_daily_limit 0: she only answers @s, never looks at the chatter.
+        mute = make_main(chatter_daily_limit=0)
+        mute._model_call = fake_call
+        silent = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
+        await asyncio.wait_for(mute.handle_group_chatter(silent), 1)
+        assert len(calls) == before and not silent.get_extra(_PROACTIVE_ANSWER_KEY)
+    finally:
+        module.QUIET_SECONDS, module.ASK_WAIT_ALONE_SECONDS, module.ASK_WAIT_SECONDS = saved
+    print("PASS policy: an unanswered ASK wakes the model; @, commands, a closed switch and limit 0 do not")
 
 
 class FakeGate:
@@ -721,44 +799,17 @@ class FakeGate:
         self.calls: list[tuple[str, dict]] = []
         self.paths: list[Path] = []
 
-    async def invoke(self, context, holder, name: str, arguments: dict) -> str:
+    async def invoke(self, context, event, name: str, arguments: dict) -> list[str]:
         self.calls.append((name, arguments))
         path = self.directory / f"drawn{len(self.calls)}.png"
         path.write_bytes(b"png")
         self.paths.append(path)
-        holder.set_extra(
-            "innerlife_tool_images", [*(holder.get_extra("innerlife_tool_images") or []), str(path)]
-        )
-        return f"saved: {path} (3 B)"
-
-    def take_images(self, holder) -> list[str]:
-        images = holder.get_extra("innerlife_tool_images") or []
-        holder.set_extra("innerlife_tool_images", [])
-        return images
-
-    def toolset_for(self, context, names):
-        from astrbot.core.agent.tool import FunctionTool
-
-        toolset = ToolSet()
-        toolset.add_tool(
-            FunctionTool(
-                name=names[0], description="d", parameters={"type": "object", "properties": {}}
-            )
-        )
-        return toolset
+        return [str(path)]
 
 
 class BoomGate(FakeGate):
-    async def invoke(self, context, holder, name: str, arguments: dict) -> str:
+    async def invoke(self, context, event, name: str, arguments: dict) -> list[str]:
         raise RuntimeError("tool exploded")
-
-
-def chain_texts(message) -> str:
-    return "".join(c.text for c in message.chain if isinstance(c, main_module.Plain))
-
-
-def has_image(event: FakeEvent) -> bool:
-    return any(isinstance(c, main_module.Image) for m in event.sent for c in m.chain)
 
 
 async def test_answer_marker_is_stripped_and_applied() -> None:
@@ -785,7 +836,7 @@ async def test_answer_marker_is_stripped_and_applied() -> None:
         assert felt[0] == "开心" and felt[3] == "被夸"
         assert instance.mind.mood(time.time())[0] > 0.2
 
-        off = stateful(directory + "/off", emotion=False, memory=False)
+        off = stateful(directory + "/off", emotion__enabled=False, memory__enabled=False)
         off_event = FakeEvent("你真棒", sender_id="u1")
         await run_request(off, off_event, ProviderRequest(prompt="你真棒"))
         await off.secure_model_response(
@@ -831,7 +882,7 @@ async def test_garbled_markers_never_leak() -> None:
 
 async def test_state_block_and_burst_rules_in_the_request() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        instance = stateful(directory)
+        instance = stateful(directory, search_rules=True)
         store = instance.store
         now = time.time()
         store.save_person("u1", "昵称u1", 50.0, "很会聊天", now)
@@ -842,7 +893,7 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
             GROUP_ID, "路人乙", "在吗", time.monotonic(), sender_id="u2", awaits_verdict=False
         )
         store.save_life(str(instance._now_dt().date()), now, weather="多云 29°C", schedule="09:00 赖床")
-        instance._proactive_chat._state(GROUP_ID).energy = 90.0
+        instance._proactive_chat.energy = 90.0
         event = FakeEvent("你好", sender_id="u1")
         request = ProviderRequest(prompt="你好")
         await run_request(instance, event, request)
@@ -853,7 +904,7 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
         assert event.get_extra(main_module._BURST_CAP_KEY) == 3
         instance._release_slot(event)
 
-        instance._proactive_chat._state(GROUP_ID).energy = 5.0
+        instance._proactive_chat.energy = 5.0
         tired = FakeEvent("你好", sender_id="u1")
         tired_request = ProviderRequest(prompt="你好")
         await run_request(instance, tired, tired_request)
@@ -861,19 +912,22 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
         assert tired.get_extra(main_module._BURST_CAP_KEY) == 1
         instance._release_slot(tired)
 
-        instance._proactive_chat._state(GROUP_ID).energy = 90.0
-        support = FakeEvent("怎么配置", sender_id="u1")
+        instance._proactive_chat.energy = 90.0
+        support_event = FakeEvent("怎么配置", sender_id="u1")
         support_request = ProviderRequest(prompt="怎么配置")
         support_request.extra_user_content_parts = [
             TextPart(text="[Related Knowledge Base Results]:\n候选")
         ]
-        await run_request(instance, support, support_request)
-        assert support.get_extra(main_module._BURST_CAP_KEY) == 0
+        await run_request(instance, support_event, support_request)
+        assert support_event.get_extra(main_module._BURST_CAP_KEY) == 0
         assert "<sp>" not in support_request.system_prompt
-        instance._release_slot(support)
+        instance._release_slot(support_event)
 
         plain = stateful(
-            directory + "/plain", emotion=False, memory=False, burst=False, search_rules=False
+            directory + "/plain",
+            emotion__enabled=False,
+            memory__enabled=False,
+            burst__enabled=False,
         )
         plain_request = ProviderRequest(prompt="你好")
         plain_event = FakeEvent("你好")
@@ -898,7 +952,8 @@ async def test_burst_split_send_and_support_stays_single() -> None:
         assert event.get_extra(main_module._BURST_REST_KEY) == ["真的假的", "笑死"]
         await instance.after_reply_sent(event)
         assert event.sent_text() == ["真的假的", "笑死"]
-        assert "你：笑死" in instance._proactive_chat.transcript(GROUP_ID, time.monotonic())
+        last = instance._proactive_chat.last_message(GROUP_ID)
+        assert last.speaker == main_module.SELF_SPEAKER and last.text == "笑死"
         assert event.get_extra(main_module._BURST_REST_KEY) == []
 
         steps = FakeEvent("怎么弄")
@@ -908,11 +963,11 @@ async def test_burst_split_send_and_support_stays_single() -> None:
         assert steps.get_extra(main_module._BURST_REST_KEY) == []
         assert "<sp>" not in plain_texts(steps.get_result())[0]
 
-        support = FakeEvent("问题")
-        support.set_extra(main_module._BURST_CAP_KEY, 0)
-        support.set_result(model_result("答案在这<sp>补充一句"))
-        await instance.secure_decorated_result(support)
-        assert plain_texts(support.get_result()) == ["答案在这 补充一句"]
+        support_event = FakeEvent("问题")
+        support_event.set_extra(main_module._BURST_CAP_KEY, 0)
+        support_event.set_result(model_result("答案在这<sp>补充一句"))
+        await instance.secure_decorated_result(support_event)
+        assert plain_texts(support_event.get_result()) == ["答案在这 补充一句"]
 
         capped = FakeEvent("闲聊")
         capped.set_extra(main_module._BURST_CAP_KEY, 2)
@@ -922,8 +977,10 @@ async def test_burst_split_send_and_support_stays_single() -> None:
         assert capped.get_extra(main_module._BURST_REST_KEY) == ["二 三 四"]
 
         interjected = FakeEvent("问题", sender_id="asker")
-        await instance.stamp_group_message(interjected)
-        await instance.stamp_group_message(FakeEvent("别人插话", sender_id="other"))
+        await instance.handle_group_chatter(interjected)
+        instance._proactive_chat.record(
+            GROUP_ID, "别人", "别人插话", time.monotonic(), sender_id="other", awaits_verdict=False
+        )
         interjected.set_extra(main_module._BURST_CAP_KEY, 3)
         interjected.set_result(model_result("甲<sp>乙"))
         await instance.secure_decorated_result(interjected)
@@ -944,7 +1001,10 @@ async def test_burst_split_send_and_support_stays_single() -> None:
 async def test_drawing_after_the_reply() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(
-            directory, draw=True, draw_tool_arguments='{"quality": "low"}', draw_daily_limit=5
+            directory,
+            draw__enabled=True,
+            draw_tool_arguments='{"quality": "low"}',
+            draw_daily_limit=5,
         )
         gate = FakeGate(directory)
         instance.gate = gate
@@ -965,7 +1025,7 @@ async def test_drawing_after_the_reply() -> None:
         assert has_image(event) and not gate.paths[0].exists()
         assert event.get_extra(main_module._DRAW_KEY) == ""
 
-        boom = stateful(directory + "/boom", draw=True)
+        boom = stateful(directory + "/boom", draw__enabled=True)
         boom.gate = BoomGate(directory)
         boom_event = FakeEvent("画", sender_id="u1")
         await run_request(boom, boom_event, ProviderRequest(prompt="画"))
@@ -978,7 +1038,7 @@ async def test_drawing_after_the_reply() -> None:
         await boom.after_reply_sent(boom_event)
         assert not has_image(boom_event)
 
-        off = stateful(directory + "/off", draw=False)
+        off = stateful(directory + "/off", draw__enabled=False)
         off_event = FakeEvent("画", sender_id="u1")
         off_request = ProviderRequest(prompt="画")
         await run_request(off, off_event, off_request)
@@ -991,32 +1051,44 @@ async def test_drawing_after_the_reply() -> None:
     print("PASS policy: her drawing decision goes through the gate; failures send nothing")
 
 
-async def test_generic_toolset_and_image_attachment() -> None:
-    with tempfile.TemporaryDirectory() as directory:
-        instance = stateful(directory, tools=True, allowed_tools=["image_generate"])
-        instance.gate = FakeGate(directory)
-        event = FakeEvent("画", sender_id="u1")
-        request = ProviderRequest(prompt="画")
-        await run_request(instance, event, request)
-        assert request.func_tool.names() == ["image_generate"]
-        assert "【工具】" in request.system_prompt
-        instance._release_slot(event)
-        path = Path(directory) / "made.png"
-        path.write_bytes(b"png")
-        event.set_extra("innerlife_tool_images", [str(path)])
-        event.set_result(model_result("给你"))
-        await instance.secure_decorated_result(event)
-        assert isinstance(event.get_result().chain[-1], main_module.Image)
-        await instance.after_reply_sent(event)
-        assert not path.exists()
+async def test_drawing_through_the_real_gate() -> None:
+    class DrawTool(FunctionTool):
+        def __init__(self) -> None:
+            super().__init__(
+                name="image_generate", description="d", parameters={"type": "object", "properties": {}}
+            )
+            self.calls: list[dict] = []
 
-        closed = stateful(directory + "/closed")
-        closed_request = ProviderRequest(prompt="画")
-        closed_event = FakeEvent("画")
-        await run_request(closed, closed_event, closed_request)
-        assert closed_request.func_tool.names() == []
-        closed._release_slot(closed_event)
-    print("PASS policy: allowed_tools go on the request through the gate; their images are attached and deleted")
+        async def call(self, context, **kwargs):
+            self.calls.append(kwargs)
+            data = base64.b64encode(b"png-bytes").decode()
+            return CallToolResult(
+                content=[ImageContent(type="image", data=data, mimeType="image/png")]
+            )
+
+    with tempfile.TemporaryDirectory() as directory:
+        instance = stateful(directory, draw__enabled=True, draw_daily_limit=1)
+        manager = FunctionToolManager()
+        tool = DrawTool()
+        manager.func_list.append(tool)
+        instance.context = SimpleNamespace(get_llm_tool_manager=lambda: manager)
+
+        event = FakeEvent("画", sender_id="u1")
+        await instance._draw_and_send(event, "一条鲸鱼", event.send)
+        assert has_image(event) and len(event.sent) == 1
+        assert tool.calls == [{"prompt": "一条鲸鱼"}]
+        assert list((Path(directory) / "images").iterdir()) == []
+        today = datetime.datetime.now(instance.s.tz).date().isoformat()
+        assert instance.store.tool_uses(today, "image_generate") == 1
+
+        await instance._draw_and_send(event, "再画一条", event.send)
+        assert len(event.sent) == 1 and len(tool.calls) == 1
+
+        blocked = stateful(directory + "/blocked", draw__enabled=True)
+        blocked.context = instance.context
+        await blocked._draw_and_send(event, "血腥的场面", event.send)
+        assert len(event.sent) == 1 and len(tool.calls) == 1
+    print("PASS policy: the real gate decodes an MCP image, counts the day, blocks terms")
 
 
 async def test_judge_sees_images_and_bursts() -> None:
@@ -1046,9 +1118,9 @@ async def test_judge_sees_images_and_bursts() -> None:
                     '哈哈<sp>这图笑死我了\n<il>{"e":[{"k":"开心","i":0.7,"why":"表情包"}]}</il>'
                 )
 
-            instance._quiet_model_call = fake_call
+            instance._model_call = fake_call
             group = f"30{int(vision)}"
-            instance._proactive_chat._state(group).energy = 90.0
+            instance._proactive_chat.energy = 90.0
             instance._proactive_chat.record(
                 group, "甲", "[图片]", time.monotonic(), sender_id="1", awaits_verdict=True,
                 images=[FakeImage(path) for path in paths],
@@ -1070,43 +1142,43 @@ async def test_insult_signal_and_bot_notes() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory)
         prompts: list[tuple[str, str]] = []
+        release = asyncio.Event()
 
         async def jab(system_prompt: str, prompt: str, **_):
             prompts.append((system_prompt, prompt))
+            await release.wait()
             return "哼 再骂试试\n<il>{}</il>"
 
-        instance._quiet_model_call = jab
+        instance._model_call = jab
         event = FakeEvent("x", messages=[])
         signal = {"type": "insulted_bot", "user_id": "u9", "user_name": "九", "text": "笨蛋"}
         await instance.note_signal(event, signal)
-        assert instance.store.person("u9")["affinity"] == -12.0
+        # The caller is not kept waiting for the jab.
+        assert instance.store.person("u9")["affinity"] == -12.0 and event.sent == []
+        release.set()
+        await asyncio.gather(*instance._background_tasks)
         assert event.sent_text() == ["哼 再骂试试"]
         assert "骂你的人：九" in prompts[0][1] and "不带脏话" in prompts[0][0]
+        assert "撤回" not in prompts[0][0]
         [(kind, _, target, _)] = instance.mind.active_emotions(time.time())
         assert (kind, target) == ("生气", "u9")
         await instance.note_signal(event, signal)
+        await asyncio.gather(*instance._background_tasks)
         assert len(event.sent) == 1 and instance.store.person("u9")["affinity"] < -23.9
-
-        via_hook = FakeEvent("x", messages=[])
-        via_hook.set_extra(
-            "innerlife_signals",
-            [{"type": "insulted_bot", "user_id": "u8", "user_name": "八", "text": "x"}],
-        )
-        await instance.after_reply_sent(via_hook)
-        assert instance.store.person("u8") is not None and via_hook.sent_text() == ["哼 再骂试试"]
 
         await instance.note_signal(event, {"type": "something_else", "user_id": "u7"})
         assert instance.store.person("u7") is None
 
-        instance.note_bot_message(GROUP_ID, f"渠道异常 key={SECRET}")
-        transcript = instance._proactive_chat.transcript(GROUP_ID, time.monotonic())
-        assert "你：渠道异常" in transcript and SECRET not in transcript
+        instance.note_bot_message(GROUP_ID, f"通知异常 key={SECRET}")
+        last = instance._proactive_chat.last_message(GROUP_ID)
+        assert last.speaker == main_module.SELF_SPEAKER
+        assert last.text.startswith("通知异常") and SECRET not in last.text
         assert GROUP_ID in instance._bot_notes
 
-        calm = stateful(directory + "/calm", emotion=False)
+        calm = stateful(directory + "/calm", emotion__enabled=False)
         await calm.note_signal(event, signal)
         assert calm.store.person("u9") is None
-    print("PASS policy: insulted_bot lowers affinity, holds a grudge, adds one jab; bot notes enter the transcript")
+    print("PASS policy: insulted_bot lowers affinity, holds a grudge, jabs in the background; bot notes enter the transcript")
 
 
 async def test_topic_starter() -> None:
@@ -1124,7 +1196,7 @@ async def test_topic_starter() -> None:
         chat.record(
             GROUP_ID, "甲", "晚点见", time.monotonic() - 3600, sender_id="1", awaits_verdict=False
         )
-        chat._state(GROUP_ID).energy = 90.0
+        chat.energy = 90.0
         instance.store.add_news([("l1", "手机又涨价了", "内存涨价", "ithome", None)], time.time())
         prompts: list[tuple[str, str]] = []
         answers = [
@@ -1136,7 +1208,7 @@ async def test_topic_starter() -> None:
             prompts.append((system_prompt, prompt))
             return answers.pop(0)
 
-        instance._quiet_model_call = call
+        instance._model_call = call
         await instance._topic(GROUP_ID)
         assert [(umo, chain_texts(chain)) for umo, chain in sent] == [
             ("umo-1", "刚刷到个新闻 手机又涨价了"),
@@ -1145,6 +1217,7 @@ async def test_topic_starter() -> None:
         system, prompt = prompts[0]
         assert "【气氛】" in prompt and "分钟前 甲：晚点见" in prompt and "1. 手机又涨价了" in prompt
         assert "news：" in system and "收着" in system
+        assert "刚发了通知" in system
         assert instance.store.unused_news(5) == []
         assert instance.mind.active_emotions(time.time())[0][0] == "无语"
         assert GROUP_ID in instance._unprompted
@@ -1163,8 +1236,8 @@ async def test_topic_starter() -> None:
         other_chat.record(
             GROUP_ID, "甲", "排障中", time.monotonic() - 3600, sender_id="1", awaits_verdict=False
         )
-        other_chat._state(GROUP_ID).energy = 90.0
-        other._quiet_model_call = call
+        other_chat.energy = 90.0
+        other._model_call = call
         await other._topic(GROUP_ID)
         assert len(prompts) == 2 and len(sent) == 2 and GROUP_ID in other._topic_tried_at
         other._topic_tried_at.clear()
@@ -1172,16 +1245,75 @@ async def test_topic_starter() -> None:
             GROUP_ID, "甲", "刚说话", time.monotonic() - 60, sender_id="1", awaits_verdict=False
         )
         await other._topic(GROUP_ID)
-        other_chat._state(GROUP_ID).energy = 5.0
-        other._reply_switch = SimpleNamespace(is_enabled=lambda _g: False)
+        other_chat.energy = 5.0
+        other.store.set_group_enabled(GROUP_ID, False)
         await other._topic(GROUP_ID)
         assert len(prompts) == 2
     print("PASS policy: proactive topics respect quiet, caps, gap, energy and the switch; the model decides PASS")
 
 
-async def test_ignored_and_nightly_steps() -> None:
-    import datetime
+async def test_topics_wait_for_the_morning() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        instance = stateful(directory)
+        started: list[str] = []
 
+        async def fake_topic(group_id: str) -> None:
+            started.append(group_id)
+
+        instance._topic = fake_topic
+        instance._umo[GROUP_ID] = "umo-1"
+        for hour in (0, 3, 7, 8, 14):
+            instance._now_dt = lambda hour=hour: datetime.datetime(
+                2026, 10, 20, hour, 30, tzinfo=instance.s.tz
+            )
+            await instance._topic_step()
+        assert started == [GROUP_ID, GROUP_ID]
+    print("PASS policy: no topic attempts between 00:00 and 08:00 in her timezone")
+
+
+async def test_model_call_never_raises_and_logs() -> None:
+    instance = make_main(max_concurrency=1)
+    outcomes: list = []
+
+    class Provider:
+        async def text_chat(self, **kwargs):
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            if outcome == "slow":
+                await asyncio.sleep(10)
+            return SimpleNamespace(role="err" if outcome == "err" else "assistant", completion_text=outcome)
+
+    instance.context = SimpleNamespace(get_using_provider=lambda: Provider())
+    saved = main_module.JUDGE_TIMEOUT_SECONDS, main_module.JOB_TIMEOUT_SECONDS
+    main_module.JUDGE_TIMEOUT_SECONDS = main_module.JOB_TIMEOUT_SECONDS = 0.05
+    try:
+        outcomes[:] = [" 好 ", "err", RuntimeError("relay down"), "slow", "slow", RuntimeError("again")]
+        assert await instance._model_call("s", "p") == "好"
+        assert await instance._model_call("s", "p") is None
+        with mock.patch.object(main_module.logger, "warning") as warn:
+            assert await instance._model_call("s", "p") is None
+            assert warn.call_args.kwargs.get("exc_info") is True
+            assert await instance._model_call("s", "p") is None
+            assert await instance._model_call("s", "p", job=True) is None
+            assert await instance._job_call("s", "p") is None
+            assert warn.call_count == 4
+
+        # Chat calls give way to a busy model; background jobs do not wait for a slot.
+        outcomes[:] = ["做完了"]
+        await instance._llm_slots.acquire()
+        assert await instance._model_call("s", "p") is None and outcomes == ["做完了"]
+        assert await instance._job_call("s", "p") == "做完了"
+        instance._llm_slots.release()
+
+        instance.context = SimpleNamespace(get_using_provider=lambda: None)
+        assert await instance._model_call("s", "p") is None
+    finally:
+        main_module.JUDGE_TIMEOUT_SECONDS, main_module.JOB_TIMEOUT_SECONDS = saved
+    print("PASS policy: a failing, slow or absent model gives None with the traceback logged")
+
+
+async def test_ignored_and_nightly_steps() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory)
         chat = instance._proactive_chat
@@ -1198,11 +1330,11 @@ async def test_ignored_and_nightly_steps() -> None:
         assert len(instance.mind.active_emotions(time.time())) == 1
         assert GROUP_ID not in instance._unprompted
 
-        tz = instance._tz
+        tz = instance.s.tz
         calls: list[str] = []
         reply: dict = {"fail": False}
 
-        async def job_call(system_prompt: str, prompt: str, provider_id: str = ""):
+        async def job_call(system_prompt: str, prompt: str):
             calls.append(system_prompt[:6])
             if reply["fail"]:
                 return None
@@ -1210,43 +1342,92 @@ async def test_ignored_and_nightly_steps() -> None:
                 return '{"memories":[{"id":1,"verdict":"keep"}]}'
             return "## 心情曲线\n还行" if "8 个二级标题" in system_prompt else "一周"
 
-        instance._job_call = job_call
+        instance.upkeep._call = job_call
         store = instance.store
         store.log_line(GROUP_ID, "1", "甲", "你好", time.time() - 60)
         store.add_memory("1", GROUP_ID, "草稿", False, time.time())
-        state_path = Path(directory) / "jobs.json"
 
         instance._now_dt = lambda: datetime.datetime(2026, 10, 19, 3, 59, tzinfo=tz)
-        await instance._night_step()
-        assert calls == [] and not state_path.exists()
+        await instance.upkeep.night()
+        assert calls == [] and store.night_steps("2026-10-19") == set()
 
         instance._now_dt = lambda: datetime.datetime(2026, 10, 19, 4, 0, tzinfo=tz)
-        await instance._night_step()
+        await instance.upkeep.night()
         assert len(calls) == 3
         assert store.diary("daily", "2026-10-18") is not None
         assert store.diary("weekly", "2026-W42") is not None
         assert store.chat_log() == [] and store.drafts() == []
-        await instance._night_step()
+        await instance.upkeep.night()
         assert len(calls) == 3
 
         reply["fail"] = True
         store.log_line(GROUP_ID, "1", "甲", "第二天", time.time() - 60)
         instance._now_dt = lambda: datetime.datetime(2026, 10, 20, 4, 5, tzinfo=tz)
-        await instance._night_step()
+        await instance.upkeep.night()
         failed_calls = len(calls)
         assert failed_calls > 3 and len(store.chat_log()) == 1
-        await instance._night_step()
+        await instance.upkeep.night()
         assert len(calls) == failed_calls
-
+        assert not list(Path(directory).glob("*.json"))
     print("PASS policy: ignored lines hurt a little; the night job runs at its time, once, and retries failures")
+
+
+async def test_model_exception_in_the_night_job_does_not_repeat_consolidation() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        instance = stateful(directory)
+        tz = instance.s.tz
+        store = instance.store
+        store.log_line(GROUP_ID, "1", "甲", "我养了只猫", time.time() - 60)
+        store.touch_person("1", "甲", time.time())
+
+        class Provider:
+            def __init__(self) -> None:
+                self.log: list[str] = []
+                self.daily_failures = 1
+
+            async def text_chat(self, *, prompt, system_prompt, contexts, image_urls=None):
+                if memory.CONSOLIDATION_PROMPT in system_prompt:
+                    self.log.append("consolidate")
+                    return SimpleNamespace(
+                        role="assistant",
+                        completion_text='{"memories":[{"id":null,"user":"1","text":"养了只猫","private":0}]}',
+                    )
+                self.log.append("daily")
+                if self.daily_failures:
+                    self.daily_failures -= 1
+                    raise RuntimeError("relay timeout")
+                assert diary.DAILY_PROMPT in system_prompt
+                return SimpleNamespace(role="assistant", completion_text="## 心情曲线\n好")
+
+        provider = Provider()
+        instance.context = SimpleNamespace(get_using_provider=lambda: provider)
+        instance._now_dt = lambda: datetime.datetime(2026, 10, 20, 4, 0, tzinfo=tz)
+
+        await instance.upkeep.night()
+        assert provider.log == ["consolidate", "daily"]
+        assert store.night_steps("2026-10-20") == {"consolidate"}
+        assert [m["content"] for m in store.all_memories()] == ["养了只猫"]
+        assert len(store.chat_log()) == 1
+
+        await instance.upkeep.night()  # waits for the retry time
+        assert provider.log == ["consolidate", "daily"]
+
+        instance.upkeep._night_retry_at = 0.0
+        await instance.upkeep.night()
+        assert provider.log == ["consolidate", "daily", "daily"]
+        assert [m["content"] for m in store.all_memories()] == ["养了只猫"]
+        assert store.night_steps("2026-10-20") == {"consolidate", "daily", "complete"}
+        assert store.diary("daily", "2026-10-19") is not None and store.chat_log() == []
+    print("PASS policy: a model exception in the night job is retried without repeating consolidation or its memories")
 
 
 async def main() -> None:
     test_scope_filters()
+    test_public_interface_is_stable()
     await test_reply_switch_permissions_and_gating()
     await test_forget_me()
     await test_persona_is_created_or_updated()
-    test_safety_prompt_link_rule()
+    test_safety_prompt_link_rule_and_no_business_words()
     await test_expiry()
     await test_cooldown()
     await test_waiting_guard()
@@ -1262,11 +1443,14 @@ async def main() -> None:
     await test_state_block_and_burst_rules_in_the_request()
     await test_burst_split_send_and_support_stays_single()
     await test_drawing_after_the_reply()
-    await test_generic_toolset_and_image_attachment()
+    await test_drawing_through_the_real_gate()
     await test_judge_sees_images_and_bursts()
     await test_insult_signal_and_bot_notes()
     await test_topic_starter()
+    await test_topics_wait_for_the_morning()
+    await test_model_call_never_raises_and_logs()
     await test_ignored_and_nightly_steps()
+    await test_model_exception_in_the_night_job_does_not_repeat_consolidation()
     print("PASS innerlife runtime policy")
 
 

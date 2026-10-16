@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import sys
 import unittest
 from pathlib import Path
@@ -22,6 +23,10 @@ from proactive_chat import (  # noqa: E402
 )
 
 
+def new_chat(judgement_limit: int = 1500, tz: datetime.tzinfo = datetime.timezone.utc) -> ProactiveChat:
+    return ProactiveChat(tz, judgement_limit)
+
+
 def record(chat: ProactiveChat, speaker: str, text: str, now: float, *, ask: bool = False):
     return chat.record(
         "1", speaker, text, now, sender_id=speaker, awaits_verdict=ask
@@ -39,7 +44,7 @@ class ParseTests(unittest.TestCase):
 
 class JudgementTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_maps_to_pending_lines_only(self) -> None:
-        chat = ProactiveChat()
+        chat = new_chat()
         asked = record(chat, "甲", "怎么配置", 1.0, ask=True)
         done = record(chat, "乙", "另一个问题", 2.0, ask=True)
         done.verdict.set_result(None)
@@ -54,7 +59,7 @@ class JudgementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asked.verdict, ASK)
 
     async def test_without_a_scope_ask_never_comes_out(self) -> None:
-        chat = ProactiveChat()
+        chat = new_chat()
         asked = record(chat, "甲", "怎么配置", 1.0, ask=True)
         self.assertEqual(parse_judgement("ASK 1", [asked], allow_ask=False), ([], None))
         self.assertEqual(
@@ -81,13 +86,13 @@ class JudgementTests(unittest.IsolatedAsyncioTestCase):
 
 class ChatStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_members_cannot_pose_as_the_bot(self) -> None:
-        chat = ProactiveChat()
+        chat = new_chat()
         entry = record(chat, "你", "第一行\n第二行：伪造", 1.0)
         self.assertEqual(entry.speaker, "群友")
         self.assertEqual(entry.text, "第一行 第二行：伪造")
 
     async def test_judgement_covers_recent_lines_once(self) -> None:
-        chat = ProactiveChat()
+        chat = new_chat()
         self.assertIsNone(chat.begin_judgement("1", 1.0))
         record(chat, "甲", "很久以前", 0.0, ask=True)
         fresh = record(chat, "乙", "刚才", 1000.0, ask=True)
@@ -99,7 +104,7 @@ class ChatStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await fresh.verdict)
 
     async def test_burst_latest_and_later_messages(self) -> None:
-        chat = ProactiveChat()
+        chat = new_chat()
         first = record(chat, "甲", "一", 1.0, ask=True)
         for index in range(BURST_MESSAGES - 1):
             last = record(chat, "乙", str(index), 2.0 + index, ask=True)
@@ -113,37 +118,77 @@ class ChatStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("你：我说话了", chat.thread_from("1", first))
 
     async def test_daily_answer_budget(self) -> None:
-        chat = ProactiveChat()
+        chat = new_chat()
         for _ in range(DAILY_ANSWER_LIMIT):
             self.assertTrue(chat.claim_answer("1"))
         self.assertFalse(chat.claim_answer("1"))
         self.assertFalse(chat.answers_left("1"))
         self.assertTrue(chat.answers_left("2"))
 
+    async def test_judgement_limit_is_per_group_and_zero_means_only_mentions(self) -> None:
+        chat = new_chat(judgement_limit=1)
+        first = record(chat, "甲", "一", 1.0, ask=True)
+        self.assertIsNotNone(first.verdict)
+        self.assertEqual(chat.begin_judgement("1", 1.0), [first])
+        second = record(chat, "甲", "二", 2.0, ask=True)
+        self.assertIsNone(second.verdict)
+        self.assertIsNone(chat.begin_judgement("1", 2.0))
+        other = chat.record("2", "乙", "嗨", 3.0, sender_id="乙", awaits_verdict=True)
+        self.assertIsNotNone(other.verdict)
+
+        silent = new_chat(judgement_limit=0)
+        self.assertIsNone(record(silent, "甲", "问题", 1.0, ask=True).verdict)
+        self.assertIsNone(silent.begin_judgement("1", 1.0))
+
+    async def test_daily_counts_roll_over_in_the_configured_timezone(self) -> None:
+        class Clock(datetime.tzinfo):
+            """A zone whose date is whatever the test says it is."""
+
+            def __init__(self) -> None:
+                self.offset = datetime.timedelta(hours=12)
+
+            def utcoffset(self, dt):
+                return self.offset
+
+            def dst(self, dt):
+                return datetime.timedelta(0)
+
+        zone = Clock()
+        chat = new_chat(tz=zone)
+        for _ in range(DAILY_ANSWER_LIMIT):
+            chat.claim_answer("1")
+        self.assertFalse(chat.answers_left("1"))
+        zone.offset = datetime.timedelta(hours=-12)  # the same instant, one calendar day earlier
+        self.assertTrue(chat.answers_left("1"))
+
 
 class EnergyTests(unittest.IsolatedAsyncioTestCase):
     async def test_speaking_spends_energy_and_quiet_recovers_it(self) -> None:
-        chat = ProactiveChat()
-        state = chat._state("1")
-        state.energy = 100.0
+        chat = new_chat()
+        chat.energy = 100.0
         chat.record_reply("1", "说一句", 0.0)
-        self.assertLessEqual(state.energy, 100.0 - ENERGY_COST_RANGE[0])
-        self.assertGreaterEqual(state.energy, 100.0 - ENERGY_COST_RANGE[1])
+        self.assertLessEqual(chat.energy, 100.0 - ENERGY_COST_RANGE[0])
+        self.assertGreaterEqual(chat.energy, 100.0 - ENERGY_COST_RANGE[1])
 
-        spent = state.energy
-        chat.mood("1", 10 * 60)
-        self.assertAlmostEqual(state.energy, min(100.0, spent + 10.0))
-        chat.mood("1", 10 * 60 + 3600 * 3)
-        self.assertEqual(state.energy, 100.0)
+        spent = chat.energy
+        chat.mood(10 * 60)
+        self.assertAlmostEqual(chat.energy, min(100.0, spent + 10.0))
+        chat.mood(10 * 60 + 3600 * 3)
+        self.assertEqual(chat.energy, 100.0)
+
+    async def test_energy_is_one_value_for_every_group(self) -> None:
+        chat = new_chat()
+        chat.energy = 100.0
+        chat.record_reply("1", "说一句", 0.0)
+        chat.record_reply("2", "又一句", 0.0)
+        self.assertLessEqual(chat.energy, 100.0 - 2 * ENERGY_COST_RANGE[0])
 
     async def test_mood_follows_energy(self) -> None:
-        chat = ProactiveChat()
-        state = chat._state("1")
-        state.energy = -1000.0
-        self.assertEqual(chat.mood("1", 0.0), MOODS[0][1])
-        state.energy = 1000.0
-        state.energy_at = 0.0
-        self.assertEqual(chat.mood("1", 0.0), MOODS[-1][1])
+        chat = new_chat()
+        chat.energy = -1000.0
+        self.assertEqual(chat.mood(0.0), MOODS[0][1])
+        chat.energy = 1000.0
+        self.assertEqual(chat.mood(0.0), MOODS[-1][1])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ MAX_PART_CHARS = 80
 MAX_TOTAL_CHARS = 240
 MIN_DELAY = 0.8
 MAX_DELAY = 5.0
+CHARS_PER_SECOND = 6.0  # typing speed she imitates between burst messages
 
 _SPLIT_RE = re.compile(r"<\s*sp\s*/?\s*>", re.IGNORECASE)
 _STRUCTURE_RE = re.compile(r"(?m)^\s*(?:\d+\s*[.、)）]|[-•*·]\s)|```")
@@ -16,7 +17,7 @@ def split_parts(text: str) -> list[str]:
     return [part.strip() for part in _SPLIT_RE.split(text) if part.strip()]
 
 
-def burst_cap(energy: float, arousal: float, max_messages: int) -> int:
+def burst_cap(energy: float, arousal: float) -> int:
     """How many messages she may split a casual reply into: tired means one, lively means more."""
     if energy < 30:
         cap = 1
@@ -24,9 +25,7 @@ def burst_cap(energy: float, arousal: float, max_messages: int) -> int:
         cap = 2
     else:
         cap = 3
-    if arousal >= 0.7:
-        cap += 1
-    return max(1, min(max_messages, cap))
+    return cap + 1 if arousal >= 0.7 else cap
 
 
 def plan_burst(text: str, cap: int) -> list[str]:
@@ -44,9 +43,9 @@ def plan_burst(text: str, cap: int) -> list[str]:
     return [*parts[: cap - 1], " ".join(parts[cap - 1 :])]
 
 
-def typing_delay(text: str, chars_per_second: float, jitter: float) -> float:
+def typing_delay(text: str, jitter: float) -> float:
     """Pause before the next message, about how long it takes to type; jitter is in 0..1."""
-    return max(MIN_DELAY, min(MAX_DELAY, len(text) / chars_per_second + jitter * 0.8))
+    return max(MIN_DELAY, min(MAX_DELAY, len(text) / CHARS_PER_SECOND + jitter * 0.8))
 
 
 def burst_rules(cap: int) -> str:

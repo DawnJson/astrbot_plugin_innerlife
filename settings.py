@@ -3,7 +3,8 @@ from __future__ import annotations
 import datetime
 import json
 import re
-from dataclasses import dataclass, field
+import zoneinfo
+from dataclasses import dataclass
 from typing import Any
 
 from .emotion import Temperament
@@ -18,109 +19,167 @@ def parse_clock(value: str) -> datetime.time:
     return datetime.time(int(match.group(1)), int(match.group(2)))
 
 
-def _list(config: dict, key: str) -> list[str]:
-    return [str(item).strip() for item in config.get(key, []) if str(item).strip()]
+def _list(values: list) -> list[str]:
+    return [str(item).strip() for item in values if str(item).strip()]
 
 
 @dataclass(frozen=True)
 class Settings:
-    """Feature switches and numbers of steps 2-5; defaults suit an open-source install."""
+    """Everything in _conf_schema.json; the defaults live only there."""
 
-    emotion: bool = True
-    temperament: Temperament = field(default_factory=Temperament)
-    insult_penalty: float = 12.0
-    ignored_minutes: int = 15
-    vent_affinity: float = 30.0
+    # basic
+    group_ids: frozenset[str]
+    astrbot_persona_id: str
+    persona_prompt: str
+    bot_names: list[str]
+    support_scope: str
+    allowed_link_domains: tuple[str, ...]
+    secret_env_vars: list[str]
+    switch_command: str
+    cooldown_seconds: float
+    max_concurrency: int
+    history_ttl_seconds: int
+    max_images: int
+    background_provider_id: str
+    chatter_daily_limit: int
+    vision: bool
+    search_rules: bool
+    timezone: str
+    tz: zoneinfo.ZoneInfo
 
-    memory: bool = True
-    memory_half_life_days: float = 30.0
-    memory_reinforce: float = 1.0
-    memory_forget_threshold: float = 0.15
-    memory_prompt_people: int = 4
-    memory_prompt_per_person: int = 5
-    forget_command: str = "/忘掉我"
-    forget_done_message: str = "好 关于你的事我都忘了"
-    person_keep_days: int = 0
-    consolidation: bool = True
-    consolidation_time: datetime.time = datetime.time(4, 0)
-    background_provider_id: str = ""
-    consolidation_max_chars: int = 24000
+    # messages
+    security_refusal_message: str
+    image_limit_message: str
+    empty_mention_message: str
+    cooldown_message: str
+    queue_busy_message: str
+    model_error_message: str
+    forget_done_message: str
+    switch_disabled_note: str
 
-    diary: bool = True
-    diary_recall_days: int = 3
-    diary_prompt_chars: int = 1200
-    diary_keep_daily_days: int = 30
-    diary_keep_weekly_days: int = 180
+    # emotion
+    emotion: bool
+    temperament: Temperament
 
-    schedule: bool = True
-    schedule_hour: int = 6
-    weather: bool = True
-    weather_refresh_minutes: int = 180
-    news: bool = True
-    news_interval_minutes: int = 120
-    news_per_feed: int = 5
-    news_keep_days: int = 7
-    news_feeds: list[str] = field(default_factory=list)
-    news_blocked_terms: list[str] = field(default_factory=list)
-    holiday_url: str = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json"
-    city_name: str = "上海"
-    latitude: float = 31.23
-    longitude: float = 121.47
-    timezone: str = "Asia/Shanghai"
+    # memory and diary
+    memory: bool
+    memory_half_life_days: float
+    forget_command: str
+    person_keep_days: int
+    consolidation_time: datetime.time
+    diary: bool
+    diary_keep_daily_days: int
+    diary_keep_weekly_days: int
 
-    proactive: bool = True
-    proactive_daily_cap: int = 6
-    proactive_min_energy: float = 40.0
-    proactive_quiet_minutes: int = 15
-    proactive_min_gap_minutes: int = 45
+    # life
+    schedule: bool
+    weather: bool
+    news: bool
+    news_feeds: list[str]
+    news_blocked_terms: list[str]
+    holiday_url: str
+    city_name: str
+    latitude: float
+    longitude: float
 
-    tools: bool = False
-    allowed_tools: list[str] = field(default_factory=list)
-    tool_daily_limits: dict[str, int] = field(default_factory=dict)
-    tool_blocked_terms: list[str] = field(default_factory=list)
-    draw: bool = False
-    draw_tool_name: str = "image_generate"
-    draw_tool_arguments: dict[str, Any] = field(default_factory=dict)
-    draw_daily_limit: int = 5
-    vision: bool = True
-    search_rules: bool = True
+    # proactive topics
+    proactive: bool
+    proactive_daily_cap: int
+    proactive_quiet_minutes: int
+    proactive_min_gap_minutes: int
 
-    burst: bool = True
-    burst_max_messages: int = 4
-    burst_chars_per_second: float = 6.0
+    # drawing
+    draw: bool
+    draw_tool_name: str
+    draw_tool_arguments: dict[str, Any]
+    draw_daily_limit: int
+    draw_blocked_terms: list[str]
+
+    # burst
+    burst: bool
 
     @classmethod
     def from_config(cls, config: dict) -> Settings:
-        defaults = cls()
-        values: dict[str, Any] = {}
-        for name, default in defaults.__dict__.items():
-            if name in ("temperament", "consolidation_time"):
-                continue
-            raw = config.get(name, default)
-            if isinstance(default, bool):
-                values[name] = bool(raw)
-            elif isinstance(default, int):
-                values[name] = int(raw)
-            elif isinstance(default, float):
-                values[name] = float(raw)
-            elif isinstance(default, list):
-                values[name] = _list(config, name)
-            elif isinstance(default, dict):
-                # AstrBot's schema has no free-form dict type: these are JSON text.
-                values[name] = json.loads(config.get(name) or "{}")
-            else:
-                values[name] = str(raw).strip()
-        values["consolidation_time"] = parse_clock(
-            str(config.get("consolidation_time", "04:00"))
+        basic, messages, emo, mem, life, pro, draw, burst = (
+            config[group]
+            for group in (
+                "basic", "messages", "emotion", "memory", "life", "proactive", "draw", "burst"
+            )
         )
-        base = Temperament()
-        values["temperament"] = Temperament(
-            **{
-                name: float(config.get(name, getattr(base, name)))
-                for name in base.__dict__
-            }
+        group_ids = frozenset(_list(basic["group_ids"]))
+        if not all(group_id.isdigit() for group_id in group_ids):
+            raise ValueError("group_ids must contain QQ group numbers")
+        switch_command = str(basic["switch_command"]).strip()
+        if not switch_command:
+            raise ValueError("switch_command must not be empty")
+        persona_id = str(basic["astrbot_persona_id"]).strip()
+        if not persona_id:
+            raise ValueError("astrbot_persona_id must not be empty")
+        timezone = str(basic["timezone"]).strip()
+        return cls(
+            group_ids=group_ids,
+            astrbot_persona_id=persona_id,
+            persona_prompt=str(basic["persona_prompt"]).strip(),
+            bot_names=_list(basic["bot_names"]),
+            support_scope=str(basic["support_scope"]).strip(),
+            allowed_link_domains=tuple(
+                domain.casefold().strip(".") for domain in _list(basic["allowed_link_domains"])
+            ),
+            secret_env_vars=_list(basic["secret_env_vars"]),
+            switch_command=switch_command,
+            cooldown_seconds=float(basic["cooldown_seconds"]),
+            max_concurrency=int(basic["max_concurrency"]),
+            history_ttl_seconds=int(basic["history_ttl_seconds"]),
+            max_images=int(basic["max_images"]),
+            background_provider_id=str(basic["background_provider_id"]).strip(),
+            chatter_daily_limit=int(basic["chatter_daily_limit"]),
+            vision=bool(basic["vision"]),
+            search_rules=bool(basic["search_rules"]),
+            timezone=timezone,
+            tz=zoneinfo.ZoneInfo(timezone),
+            security_refusal_message=messages["security_refusal_message"],
+            image_limit_message=messages["image_limit_message"],
+            empty_mention_message=messages["empty_mention_message"],
+            cooldown_message=messages["cooldown_message"],
+            queue_busy_message=messages["queue_busy_message"],
+            model_error_message=messages["model_error_message"],
+            forget_done_message=messages["forget_done_message"],
+            switch_disabled_note=messages["switch_disabled_note"],
+            emotion=bool(emo["enabled"]),
+            temperament=Temperament(
+                temper_flare=float(emo["temper_flare"]),
+                temper_grudge=float(emo["temper_grudge"]),
+                temper_soften=float(emo["temper_soften"]),
+                mood_half_life_hours=float(emo["mood_half_life_hours"]),
+                mood_baseline_valence=float(emo["mood_baseline_valence"]),
+                affinity_fade_days=float(emo["affinity_fade_days"]),
+            ),
+            memory=bool(mem["enabled"]),
+            memory_half_life_days=float(mem["memory_half_life_days"]),
+            forget_command=str(mem["forget_command"]).strip(),
+            person_keep_days=int(mem["person_keep_days"]),
+            consolidation_time=parse_clock(str(mem["consolidation_time"])),
+            diary=bool(mem["diary"]),
+            diary_keep_daily_days=int(mem["diary_keep_daily_days"]),
+            diary_keep_weekly_days=int(mem["diary_keep_weekly_days"]),
+            schedule=bool(life["schedule"]),
+            weather=bool(life["weather"]),
+            news=bool(life["news"]),
+            news_feeds=_list(life["news_feeds"]),
+            news_blocked_terms=_list(life["news_blocked_terms"]),
+            holiday_url=str(life["holiday_url"]).strip(),
+            city_name=str(life["city_name"]).strip(),
+            latitude=float(life["latitude"]),
+            longitude=float(life["longitude"]),
+            proactive=bool(pro["enabled"]),
+            proactive_daily_cap=int(pro["proactive_daily_cap"]),
+            proactive_quiet_minutes=int(pro["proactive_quiet_minutes"]),
+            proactive_min_gap_minutes=int(pro["proactive_min_gap_minutes"]),
+            draw=bool(draw["enabled"]),
+            draw_tool_name=str(draw["draw_tool_name"]).strip(),
+            # AstrBot's schema has no free-form dict type: this is JSON text.
+            draw_tool_arguments=json.loads(draw["draw_tool_arguments"] or "{}"),
+            draw_daily_limit=int(draw["draw_daily_limit"]),
+            draw_blocked_terms=_list(draw["draw_blocked_terms"]),
+            burst=bool(burst["enabled"]),
         )
-        values["tool_daily_limits"] = {
-            str(name): int(limit) for name, limit in values["tool_daily_limits"].items()
-        }
-        return cls(**values)

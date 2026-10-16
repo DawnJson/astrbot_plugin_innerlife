@@ -66,14 +66,14 @@ class SafetyTests(unittest.TestCase):
         output = sanitize_output_links(
             "参考 https://docs.example.com/api/overview 和 "
             "check.linux.do/group/Pro 以及 https://other.test/a?x=1 "
-            "和 [外部监控](https://check.linux.do/group/Pro) "
+            "和 [外部状态页](https://check.linux.do/group/Pro) "
             "和 http://example.com/plain",
             domains,
         )
         self.assertIn("https://docs.example.com/api/overview", output)
         self.assertNotIn("check.linux.do", output)
         self.assertNotIn("other.test", output)
-        self.assertNotIn("外部监控", output)
+        self.assertNotIn("外部状态页", output)
         self.assertNotIn("http://example.com/plain", output)
         self.assertNotIn("](链接已隐藏)", output)
         self.assertEqual(

@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-import asyncio
+import dataclasses
 import datetime
 import sqlite3
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from support import make_config, make_settings
 
 from astrbot_plugin_innerlife import burst, diary, emotion, jobs, marker, memory  # noqa: E402
 from astrbot_plugin_innerlife.mind import Mind  # noqa: E402
 from astrbot_plugin_innerlife.settings import Settings, parse_clock  # noqa: E402
 from astrbot_plugin_innerlife.store import Store  # noqa: E402
 
-T = emotion.Temperament()
+T = make_settings().temperament
 HOUR = 3600.0
 
 CONTRACT_COLUMNS = {
@@ -31,16 +30,19 @@ CONTRACT_COLUMNS = {
     "life": ["day", "schedule", "weather", "day_kind", "updated_at"],
     "news": ["link", "title", "summary", "source", "published_at", "fetched_at", "used_at"],
     "chat_log": ["id", "group_id", "user_id", "name", "text", "at"],
+    "night_jobs": ["day", "step"],
+    "tool_usage": ["day", "name", "count"],
+    "disabled_groups": ["group_id"],
 }
 
 
 class EmotionTests(unittest.TestCase):
     def test_emotion_decays_and_grudges_last_longer(self) -> None:
-        half = T.emotion_half_life_minutes * 60
+        half = emotion.EMOTION_HALF_LIFE_MINUTES * 60
         self.assertAlmostEqual(emotion.decayed_intensity(1.0, half, T), 0.5)
         self.assertAlmostEqual(emotion.decayed_intensity(1.0, 0, T), 1.0)
-        forgiving = emotion.Temperament(temper_grudge=0.0)
-        grudging = emotion.Temperament(temper_grudge=1.0)
+        forgiving = dataclasses.replace(T, temper_grudge=0.0)
+        grudging = dataclasses.replace(T, temper_grudge=1.0)
         self.assertLess(
             emotion.decayed_intensity(1.0, half, forgiving, grudge=True),
             emotion.decayed_intensity(1.0, half, grudging, grudge=True),
@@ -69,24 +71,24 @@ class EmotionTests(unittest.TestCase):
         self.assertAlmostEqual(emotion.faded_affinity(40, T.affinity_fade_days * 86400, T), 20)
         self.assertAlmostEqual(emotion.faded_affinity(-40, 0, T), -40)
         hostile = emotion.apply_sentiment(0, -2, T)
-        self.assertEqual(emotion.apply_sentiment(-21, 2, T), min(0.0, -21 + 2 * T.affinity_step * T.temper_soften))
+        self.assertEqual(emotion.apply_sentiment(-21, 2, T), min(0.0, -21 + 2 * emotion.AFFINITY_STEP * T.temper_soften))
         self.assertLessEqual(emotion.apply_sentiment(-21, 2, T), 0)
         self.assertGreater(emotion.apply_sentiment(-30, 1, T) - -30, emotion.apply_sentiment(30, 1, T) - 30)
         value = 0.0
         for step in range(1, 4):
             value = emotion.apply_sentiment(value, 1, T)
-            self.assertAlmostEqual(value, step * T.affinity_step)
+            self.assertAlmostEqual(value, step * emotion.AFFINITY_STEP)
         self.assertLess(hostile, 0)
         value = 0.0
         for _ in range(100):
             value = emotion.apply_sentiment(value, -2, T)
-        self.assertEqual(value, T.affinity_floor)
+        self.assertEqual(value, emotion.AFFINITY_FLOOR)
         for _ in range(100):
             value = emotion.apply_sentiment(value, 2, T)
         self.assertEqual(value, emotion.AFFINITY_MAX)
 
     def test_temperament_parameters_scale_the_effect(self) -> None:
-        touchy = emotion.Temperament(temper_flare=2.0)
+        touchy = dataclasses.replace(T, temper_flare=2.0)
         self.assertLess(emotion.apply_sentiment(0, -1, touchy), emotion.apply_sentiment(0, -1, T))
 
 
@@ -161,17 +163,16 @@ class BurstTests(unittest.TestCase):
         self.assertEqual(len(burst.plan_burst("<sp>".join(["字" * 70] * 4), 4)), 1)
 
     def test_cap_follows_energy_and_arousal(self) -> None:
-        self.assertEqual(burst.burst_cap(10, 0.3, 4), 1)
-        self.assertEqual(burst.burst_cap(50, 0.3, 4), 2)
-        self.assertEqual(burst.burst_cap(90, 0.3, 4), 3)
-        self.assertEqual(burst.burst_cap(90, 0.9, 4), 4)
-        self.assertEqual(burst.burst_cap(90, 0.9, 2), 2)
+        self.assertEqual(burst.burst_cap(10, 0.3), 1)
+        self.assertEqual(burst.burst_cap(50, 0.3), 2)
+        self.assertEqual(burst.burst_cap(90, 0.3), 3)
+        self.assertEqual(burst.burst_cap(90, 0.9), 4)
         self.assertEqual(burst.burst_rules(1), "")
         self.assertIn("2 到 3 条", burst.burst_rules(3))
 
     def test_typing_pause_is_bounded(self) -> None:
-        self.assertEqual(burst.typing_delay("嗯", 6, 0), burst.MIN_DELAY)
-        self.assertEqual(burst.typing_delay("长" * 500, 6, 1), burst.MAX_DELAY)
+        self.assertEqual(burst.typing_delay("嗯", 0), burst.MIN_DELAY)
+        self.assertEqual(burst.typing_delay("长" * 500, 1), burst.MAX_DELAY)
 
 
 class MemoryTests(unittest.TestCase):
@@ -228,14 +229,16 @@ class DiaryScheduleTests(unittest.TestCase):
         for bad in ("25:00", "4", "04:60", "abc"):
             with self.assertRaises(ValueError):
                 parse_clock(bad)
-        self.assertEqual(Settings.from_config({"consolidation_time": "03:15"}).consolidation_time, datetime.time(3, 15))
+        self.assertEqual(
+            make_settings(consolidation_time="03:15").consolidation_time, datetime.time(3, 15)
+        )
 
     def test_daily_template_is_forced(self) -> None:
         body = diary.normalize_daily("## 心情曲线\n早上困\n\n## 自己的想法\n还在生气\n## 乱写的标题\n忽略")
         headings = [line[3:] for line in body.splitlines() if line.startswith("## ")]
         self.assertEqual(headings, list(diary.SECTIONS))
         self.assertEqual(diary.section(body, "心情曲线"), "早上困")
-        self.assertEqual(diary.section(body, "工作小结"), "")
+        self.assertEqual(diary.section(body, "做了什么正事"), "")
         self.assertNotIn("忽略", body)
 
     def test_recall_leaves_out_private_sections_and_is_bounded(self) -> None:
@@ -320,19 +323,47 @@ class StoreTests(unittest.TestCase):
             store.add_memory("old", "g", "养了只猫", False, now - 31 * day)
             store.save_person("new", "新人", 10.0, "", now - 29 * day)
             today = datetime.date(2026, 10, 17)
-            jobs.prune(store, Settings(), today, now)
+            jobs.prune(store, make_settings(), today, now)
             self.assertIsNotNone(store.person("old"))
-            jobs.prune(store, Settings(person_keep_days=30), today, now)
+            jobs.prune(store, make_settings(person_keep_days=30), today, now)
             self.assertIsNone(store.person("old"))
             self.assertEqual(store.memories_of("old"), [])
             self.assertIsNotNone(store.person("new"))
+
+    def test_night_progress_tool_usage_and_the_reply_switch_live_in_the_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "innerlife.db"
+            store = Store(path)
+            self.assertEqual(store.night_steps("2026-10-16"), set())
+            store.mark_night_step("2026-10-16", "daily")
+            store.mark_night_step("2026-10-16", "daily")
+            self.assertEqual(Store(path).night_steps("2026-10-16"), {"daily"})
+            store.delete_night_before("2026-10-17")
+            self.assertEqual(store.night_steps("2026-10-16"), set())
+
+            self.assertEqual(store.tool_uses("2026-10-16", "draw"), 0)
+            store.add_tool_use("2026-10-16", "draw")
+            store.add_tool_use("2026-10-16", "draw")
+            self.assertEqual(Store(path).tool_uses("2026-10-16", "draw"), 2)
+            store.add_tool_use("2026-10-17", "draw")
+            self.assertEqual(store.tool_uses("2026-10-16", "draw"), 0)
+            self.assertEqual(store.tool_uses("2026-10-17", "draw"), 1)
+
+            self.assertTrue(store.group_enabled("10001"))
+            self.assertTrue(store.set_group_enabled("10001", False))
+            self.assertFalse(store.set_group_enabled("10001", False))
+            self.assertFalse(Store(path).group_enabled("10001"))
+            self.assertTrue(store.group_enabled("10002"))
+            self.assertTrue(store.set_group_enabled("10001", True))
+            self.assertFalse(store.set_group_enabled("10001", True))
+            self.assertTrue(Store(path).group_enabled("10001"))
 
 
 class MindTests(unittest.TestCase):
     def test_marker_updates_affinity_impression_drafts_and_dedupes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
-            mind = Mind(store, Settings())
+            mind = Mind(store, make_settings())
             _, parsed = marker.parse_marker(
                 '<il>{"e":[{"k":"开心","i":0.8,"why":"被夸"}],'
                 '"p":[{"s":2,"imp":"嘴甜","m":[{"t":"在准备考研"},{"t":"刚分手","x":1}]}]}</il>'
@@ -344,7 +375,7 @@ class MindTests(unittest.TestCase):
             self.assertEqual([(m["content"], m["private"]) for m in store.memories_of("1")], [("在准备考研", 0), ("刚分手", 1)])
             [felt] = mind.active_emotions(now)
             self.assertEqual(felt[0], "开心")
-            self.assertGreater(mind.mood(now)[0], Settings().temperament.mood_baseline_valence)
+            self.assertGreater(mind.mood(now)[0], make_settings().temperament.mood_baseline_valence)
             mind.apply_marker(parsed, now + 10, group_id="g", resolve=lambda _n: None, default=("1", "甲"))
             self.assertEqual(len(store.memories_of("1")), 2)
             self.assertEqual(store.memories_of("1")[0]["mentions"], 2)
@@ -352,7 +383,7 @@ class MindTests(unittest.TestCase):
     def test_unknown_names_do_not_get_credit_in_a_group_judgement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
-            mind = Mind(store, Settings())
+            mind = Mind(store, make_settings())
             _, parsed = marker.parse_marker('<il>{"p":[{"n":"路人","s":2,"m":[{"t":"x"}]}]}</il>')
             mind.apply_marker(parsed, 1.0, group_id="g", resolve=lambda _n: None)
             self.assertEqual(store.all_people(), [])
@@ -361,7 +392,7 @@ class MindTests(unittest.TestCase):
     def test_insult_drops_affinity_and_the_anger_lingers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
-            mind = Mind(store, Settings())
+            mind = Mind(store, make_settings())
             mind.insulted("9", "九", 0.0)
             self.assertEqual(store.person("9")["affinity"], -12.0)
             later = 4 * HOUR
@@ -373,7 +404,7 @@ class MindTests(unittest.TestCase):
     def test_state_text_hides_private_memories_and_offers_venting_to_friends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
-            mind = Mind(store, Settings())
+            mind = Mind(store, make_settings())
             now = time.time()
             store.save_person("1", "甲", 50.0, "很会聊天", now)
             store.save_person("2", "乙", -30.0, "总抬杠", now)
@@ -392,7 +423,7 @@ class MindTests(unittest.TestCase):
     def test_forgotten_memories_leave_the_prompt_and_the_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
-            settings = Settings()
+            settings = make_settings()
             mind = Mind(store, settings)
             old = time.time() - 400 * 86400
             store.add_memory("1", "g", "很久以前的事", False, old)
@@ -406,9 +437,8 @@ class MindTests(unittest.TestCase):
 
 class NightJobTests(unittest.IsolatedAsyncioTestCase):
     async def test_night_run_consolidates_writes_diaries_and_purges(self) -> None:
-        tz = datetime.timezone(datetime.timedelta(hours=8))
         monday = datetime.date(2026, 10, 19)
-        settings = Settings()
+        settings = make_settings()
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
             now = time.time()
@@ -419,7 +449,7 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
             drop = store.add_memory("1", "g", "说她是猫", False, now)
             calls: list[str] = []
 
-            async def call(system: str, prompt: str, provider: str):
+            async def call(system: str, prompt: str):
                 calls.append(system[:8])
                 if system == memory.CONSOLIDATION_PROMPT:
                     return (
@@ -434,10 +464,10 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
                 return "压缩的一周"
 
             store.add_emotion("开心", "1", 0.5, "被夸", now - 50)
-            done: set[str] = set()
-            complete = await jobs.run_night(store, call, settings, monday, tz, done, now)
-            self.assertTrue(complete)
-            self.assertEqual(done, {"consolidate", "daily", "weekly"})
+            self.assertTrue(await jobs.run_night(store, call, settings, monday, now))
+            self.assertEqual(
+                store.night_steps("2026-10-19"), {"consolidate", "daily", "weekly", "complete"}
+            )
             self.assertEqual(
                 sorted((m["content"], m["status"]) for m in store.all_memories()),
                 [("在准备考研", "kept"), ("想考研", "kept")],
@@ -453,9 +483,10 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(store.diary("monthly", "2026-09"))
             self.assertEqual(store.chat_log(), [])
             self.assertEqual(len(calls), 3)
+            self.assertTrue(await jobs.run_night(store, call, settings, monday, now))
+            self.assertEqual(len(calls), 3)
 
     async def test_failed_step_keeps_the_log_and_retries_only_that_step(self) -> None:
-        tz = datetime.timezone.utc
         today = datetime.date(2026, 10, 16)
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
@@ -464,39 +495,84 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
             store.add_memory("1", "g", "草稿", False, now)
             answers = {"consolidate": None}
 
-            async def call(system: str, prompt: str, provider: str):
+            async def call(system: str, prompt: str):
                 if system == memory.CONSOLIDATION_PROMPT:
                     return answers["consolidate"]
                 return "## 心情曲线\n好"
 
-            done: set[str] = set()
-            self.assertFalse(await jobs.run_night(store, call, Settings(), today, tz, done, now))
-            self.assertEqual(done, {"daily"})
+            self.assertFalse(await jobs.run_night(store, call, make_settings(), today, now))
+            self.assertEqual(store.night_steps("2026-10-16"), {"daily"})
             self.assertEqual(len(store.chat_log()), 1)
             self.assertEqual(store.drafts()[0]["content"], "草稿")
             answers["consolidate"] = '{"memories":[{"id":1,"verdict":"keep"}]}'
-            self.assertTrue(await jobs.run_night(store, call, Settings(), today, tz, done, now))
+            self.assertTrue(await jobs.run_night(store, call, make_settings(), today, now))
             self.assertEqual(store.chat_log(), [])
             self.assertEqual(store.drafts(), [])
 
+    async def test_a_failure_after_consolidation_never_repeats_it(self) -> None:
+        today = datetime.date(2026, 10, 16)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "innerlife.db")
+            now = time.time()
+            store.log_line("g", "1", "甲", "我养了只猫", now - 10)
+            calls: list[str] = []
+            diary_works = {"yes": False}
+
+            async def call(system: str, prompt: str):
+                calls.append(system)
+                if system == memory.CONSOLIDATION_PROMPT:
+                    return '{"memories":[{"id":null,"user":"1","text":"养了只猫","private":0}]}'
+                return "## 心情曲线\n好" if diary_works["yes"] else None
+
+            settings = make_settings()
+            self.assertFalse(await jobs.run_night(store, call, settings, today, now))
+            self.assertFalse(await jobs.run_night(store, call, settings, today, now))
+            self.assertEqual(calls.count(memory.CONSOLIDATION_PROMPT), 1)
+            diary_works["yes"] = True
+            self.assertTrue(await jobs.run_night(store, call, settings, today, now))
+            self.assertEqual(calls.count(memory.CONSOLIDATION_PROMPT), 1)
+            self.assertEqual([m["content"] for m in store.all_memories()], ["养了只猫"])
+            self.assertEqual(store.chat_log(), [])
+
     async def test_switched_off_features_skip_their_steps(self) -> None:
-        tz = datetime.timezone.utc
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
             now = time.time()
             store.log_line("g", "1", "甲", "你好", now - 10)
 
-            async def call(system: str, prompt: str, provider: str):
+            async def call(system: str, prompt: str):
                 raise AssertionError("no model call expected")
 
-            settings = Settings(consolidation=False, diary=False)
+            settings = make_settings(memory__enabled=False, diary=False)
             self.assertTrue(
-                await jobs.run_night(store, call, settings, datetime.date(2026, 10, 16), tz, set(), now)
+                await jobs.run_night(store, call, settings, datetime.date(2026, 10, 16), now)
             )
             self.assertEqual(store.chat_log(), [])
 
+    async def test_upkeep_runs_the_night_once_at_its_time(self) -> None:
+        tz = make_settings().tz
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "innerlife.db")
+            store.log_line("g", "1", "甲", "你好", time.time() - 60)
+            calls: list[str] = []
+
+            async def call(system: str, prompt: str):
+                calls.append(system)
+                return "## 心情曲线\n好"
+
+            clock = {"now": datetime.datetime(2026, 10, 16, 3, 59, tzinfo=tz)}
+            upkeep = jobs.Upkeep(store, call, make_settings(memory__enabled=False), None, lambda: clock["now"])
+            await upkeep.night()
+            self.assertEqual(calls, [])
+            clock["now"] = datetime.datetime(2026, 10, 16, 4, 0, tzinfo=tz)
+            await upkeep.night()
+            self.assertEqual(len(calls), 1)
+            await upkeep.night()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(store.chat_log(), [])
+
     async def test_schedule_uses_the_day_weather_and_yesterdays_plan(self) -> None:
-        today = datetime.date(2026, 10, 16)
+        tz = make_settings().tz
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
             store.save_life("2026-10-16", 1.0, weather="多云 29°C", day_kind="工作日")
@@ -504,18 +580,72 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
             store.save_diary("daily", "2026-10-15", diary.normalize_daily("## 明天的打算\n去海边"), 1.0)
             seen: list[tuple[str, str]] = []
 
-            async def call(system: str, prompt: str, provider: str):
+            async def call(system: str, prompt: str):
                 seen.append((system, prompt))
                 return '09:00 起床\n12:00 吃饭\n<il>{"e":[{"k":"困","i":0.5,"why":"没睡醒"}]}</il>'
 
-            parsed = await jobs.make_schedule(store, call, Settings(city_name="三亚"), "人设", today, 2.0)
+            settings = make_settings(city_name="三亚", persona_prompt="人设")
+            upkeep = jobs.Upkeep(
+                store, call, settings, None,
+                lambda: datetime.datetime(2026, 10, 16, 7, 0, tzinfo=tz),
+            )
+            parsed = await upkeep.schedule()
             self.assertEqual(store.life("2026-10-16")["schedule"], "09:00 起床\n12:00 吃饭")
             self.assertEqual(store.life("2026-10-16")["weather"], "多云 29°C")
             self.assertEqual([e.kind for e in parsed.emotions], ["困"])
             system, prompt = seen[0]
             self.assertIn("住在三亚", system)
+            for kind in emotion.KINDS:
+                self.assertIn(kind, system)
             for wanted in ("多云 29°C", "工作日", "09:00 赖床", "去海边", "周五"):
                 self.assertIn(wanted, prompt)
+            self.assertIsNone(await upkeep.schedule())
+            self.assertEqual(len(seen), 1)
+
+    async def test_log_text_uses_the_given_timezone(self) -> None:
+        row = {"at": 0.0, "name": "甲", "user_id": "1", "text": "嗨"}
+        utc = datetime.timezone.utc
+        plus8 = datetime.timezone(datetime.timedelta(hours=8))
+        self.assertEqual(jobs.log_text([row], 100, utc), "00:00 甲(1)：嗨")
+        self.assertEqual(jobs.log_text([row], 100, plus8), "08:00 甲(1)：嗨")
+
+
+class SettingsTests(unittest.TestCase):
+    def test_schema_defaults_build_the_settings(self) -> None:
+        s = make_settings()
+        self.assertEqual((s.vision, s.search_rules, s.person_keep_days), (True, False, 180))
+        self.assertEqual(s.chatter_daily_limit, 500)
+        self.assertEqual(s.draw_tool_arguments, {})
+        self.assertIn("习近平", s.draw_blocked_terms)
+        self.assertTrue(s.news_feeds and s.news_blocked_terms)
+
+    def test_bad_values_are_rejected(self) -> None:
+        for overrides in (
+            {"group_ids": ["abc"]},
+            {"switch_command": " "},
+            {"astrbot_persona_id": ""},
+            {"consolidation_time": "25:00"},
+        ):
+            with self.assertRaises(ValueError, msg=overrides):
+                make_settings(**overrides)
+
+    def test_every_schema_key_is_read(self) -> None:
+        # Each key changes the settings, so none is dead.
+        base = make_settings()
+        probes = {"int": 7, "float": 0.25, "string": "x", "list": ["1"]}
+        schema = make_config()
+        for group, keys in schema.items():
+            for key, value in keys.items():
+                if key in ("consolidation_time", "draw_tool_arguments", "timezone", "group_ids"):
+                    continue
+                kind = (
+                    "bool" if isinstance(value, bool) else "int" if isinstance(value, int)
+                    else "float" if isinstance(value, float) else "list" if isinstance(value, list)
+                    else "string"
+                )
+                probe = not value if kind == "bool" else probes[kind]
+                changed = make_config(**{f"{group}__{key}": probe})
+                self.assertNotEqual(Settings.from_config(changed), base, f"{group}.{key} unused")
 
 
 if __name__ == "__main__":

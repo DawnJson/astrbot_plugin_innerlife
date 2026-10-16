@@ -7,13 +7,24 @@ from . import diary, emotion
 from .emotion import KINDS
 from .life import WEEKDAYS
 from .marker import Marker
-from .memory import effective_strength, reinforced, same_memory
+from .memory import (
+    FORGET_THRESHOLD,
+    MEMORY_REINFORCE,
+    effective_strength,
+    reinforced,
+    same_memory,
+)
 from .settings import Settings
 from .store import Store
 
 MAX_EMOTIONS_IN_PROMPT = 4
 MIN_FELT = 0.1
 NEGATIVE = -0.2
+INSULT_PENALTY = 12.0  # affinity lost when someone insults her to her face; scaled by temper_flare
+PROMPT_PEOPLE = 4  # people whose memories go into one reply's prompt
+PROMPT_PER_PERSON = 5  # memories per person
+DIARY_RECALL_DAYS = 3  # recent days of diary she reads in full; older ones come as weekly/monthly summaries
+DIARY_PROMPT_CHARS = 1200
 
 # resolve(name) -> (user_id, name) of a person who spoke in this conversation, else None
 Resolve = Callable[[str], tuple[str, str] | None]
@@ -31,7 +42,7 @@ class Mind:
         t = self.s.temperament
         row = self.store.mood()
         if row is None:
-            return t.mood_baseline_valence, t.mood_baseline_arousal
+            return t.mood_baseline_valence, emotion.MOOD_BASELINE_AROUSAL
         return emotion.mood_now(row["valence"], row["arousal"], now - row["updated_at"], t)
 
     def saved_energy(self) -> float | None:
@@ -100,8 +111,8 @@ class Mind:
         t = self.s.temperament
         row = self.store.person(user_id)
         affinity = max(
-            t.affinity_floor,
-            self.affinity(user_id, now) - self.s.insult_penalty * t.temper_flare,
+            emotion.AFFINITY_FLOOR,
+            self.affinity(user_id, now) - INSULT_PENALTY * t.temper_flare,
         )
         self.store.save_person(user_id, name, affinity, row["impression"] if row else "", now)
         self.feel("生气", 0.8, user_id, "被骂了", now, emotion.INSULT_GRUDGE_MULTIPLIER)
@@ -116,7 +127,7 @@ class Mind:
                     self.s.memory_half_life_days,
                 )
                 self.store.reinforce_memory(
-                    row["id"], reinforced(row["strength"], current, self.s.memory_reinforce), now
+                    row["id"], reinforced(row["strength"], current, MEMORY_REINFORCE), now
                 )
                 return
         self.store.add_memory(user_id, group_id, text, private, now)
@@ -177,7 +188,7 @@ class Mind:
         friends = [
             name
             for user_id, name in people
-            if user_id not in angry_at and self.affinity(user_id, now) >= self.s.vent_affinity
+            if user_id not in angry_at and self.affinity(user_id, now) >= emotion.AFFINITY_LIKE
         ]
         if upset and friends:
             lines.append(
@@ -187,7 +198,7 @@ class Mind:
 
     def people_text(self, people: list[tuple[str, str]], now: float) -> str:
         lines = []
-        for user_id, name in people[: self.s.memory_prompt_people]:
+        for user_id, name in people[:PROMPT_PEOPLE]:
             row = self.store.person(user_id)
             affinity = self.affinity(user_id, now)
             memories = sorted(
@@ -205,8 +216,8 @@ class Mind:
             )
             kept = [
                 text
-                for strength, text in memories[: self.s.memory_prompt_per_person]
-                if strength > self.s.memory_forget_threshold
+                for strength, text in memories[:PROMPT_PER_PERSON]
+                if strength > FORGET_THRESHOLD
             ] if self.s.memory else []
             impression = row["impression"] if row else ""
             if not kept and not impression and abs(affinity) < 15:
@@ -244,16 +255,16 @@ class Mind:
             return ""
         dailies = [
             (row["period"], row["body"])
-            for row in self.store.recent_diaries("daily", self.s.diary_recall_days + 1)
+            for row in self.store.recent_diaries("daily", DIARY_RECALL_DAYS + 1)
             if row["period"] < str(today)
-        ][: self.s.diary_recall_days]
+        ][:DIARY_RECALL_DAYS]
         weekly = self.store.recent_diaries("weekly", 1)
         monthly = self.store.recent_diaries("monthly", 1)
         text = diary.recall_text(
             dailies,
             (weekly[0]["period"], weekly[0]["body"]) if weekly else None,
             (monthly[0]["period"], monthly[0]["body"]) if monthly else None,
-            self.s.diary_prompt_chars,
+            DIARY_PROMPT_CHARS,
         )
         if not text:
             return ""

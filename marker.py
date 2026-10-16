@@ -14,7 +14,7 @@ MAX_NEWS = 2
 _CLOSED_RE = re.compile(r"<il>(.*?)</il>", re.DOTALL | re.IGNORECASE)
 _OPEN_RE = re.compile(r"<il>(.*)$", re.DOTALL | re.IGNORECASE)
 _STRAY_RE = re.compile(r"</?il>|<i(?:l)?$", re.IGNORECASE)
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def parse_marker(text: str) -> tuple[str, Marker]:
     raw = (closed or opened).group(1) if (closed or opened) else ""
     visible = _STRAY_RE.sub("", _OPEN_RE.sub("", _CLOSED_RE.sub("", text))).strip()
     try:
-        data = json.loads(_FENCE_RE.sub("", raw.strip()))
+        data = json.loads(FENCE_RE.sub("", raw.strip()))
     except ValueError:
         return visible, Marker()
     if not isinstance(data, dict):

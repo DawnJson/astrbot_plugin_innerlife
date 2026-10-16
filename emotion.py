@@ -23,23 +23,23 @@ KINDS: dict[str, tuple[float, float]] = {
 MOOD_PUSH = 0.4
 INSULT_GRUDGE_MULTIPLIER = 3.0
 AFFINITY_MAX = 100.0
-FORGET_BELOW = 0.05
+AFFINITY_FLOOR = -60.0
+AFFINITY_STEP = 4.0  # plain affinity change per sentiment point; temper_flare/temper_soften scale it
+AFFINITY_LIKE = 25.0  # "有好感"; also how fond she must be of someone to vent to them
+EMOTION_HALF_LIFE_MINUTES = 90.0
+MOOD_BASELINE_AROUSAL = 0.3
 
 
 @dataclass(frozen=True)
 class Temperament:
-    """Her temperament; the defaults are a tsundere: flares fast, forgives fast, softens at kindness."""
+    """Her temperament; the settings pick it (the schema default is a tsundere: flares fast, forgives fast, softens at kindness)."""
 
-    temper_flare: float = 1.0  # multiplies how hard hostile treatment lands
-    temper_grudge: float = 0.3  # 0 forgets at once, 1 holds on for long
-    temper_soften: float = 2.0  # multiplies the plain step when kindness wins back negative affinity (up to 0)
-    emotion_half_life_minutes: float = 90.0
-    mood_half_life_hours: float = 12.0
-    mood_baseline_valence: float = 0.2
-    mood_baseline_arousal: float = 0.3
-    affinity_fade_days: float = 14.0
-    affinity_floor: float = -60.0
-    affinity_step: float = 4.0
+    temper_flare: float  # multiplies how hard hostile treatment lands
+    temper_grudge: float  # 0 forgets at once, 1 holds on for long
+    temper_soften: float  # multiplies the plain step when kindness wins back negative affinity (up to 0)
+    mood_half_life_hours: float
+    mood_baseline_valence: float
+    affinity_fade_days: float
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -50,7 +50,7 @@ def decayed_intensity(
     intensity: float, age_seconds: float, t: Temperament, *, grudge: bool = False, held: float = 1.0
 ) -> float:
     """Current strength of an emotion; anger/hurt at a person lasts with temper_grudge, `held` stretches it further."""
-    half_life = t.emotion_half_life_minutes * 60 * held
+    half_life = EMOTION_HALF_LIFE_MINUTES * 60 * held
     if grudge:
         half_life *= 0.5 + 1.5 * t.temper_grudge
     return intensity * 0.5 ** (max(0.0, age_seconds) / half_life)
@@ -61,7 +61,7 @@ def mood_now(valence: float, arousal: float, age_seconds: float, t: Temperament)
     keep = 0.5 ** (max(0.0, age_seconds) / (t.mood_half_life_hours * 3600))
     return (
         t.mood_baseline_valence + (valence - t.mood_baseline_valence) * keep,
-        t.mood_baseline_arousal + (arousal - t.mood_baseline_arousal) * keep,
+        MOOD_BASELINE_AROUSAL + (arousal - MOOD_BASELINE_AROUSAL) * keep,
     )
 
 
@@ -85,10 +85,10 @@ def apply_sentiment(affinity: float, sentiment: float, t: Temperament) -> float:
     grows at the plain step."""
     sentiment = _clamp(sentiment, -2.0, 2.0)
     if sentiment < 0:
-        return _clamp(affinity + sentiment * t.affinity_step * t.temper_flare, t.affinity_floor, AFFINITY_MAX)
+        return _clamp(affinity + sentiment * AFFINITY_STEP * t.temper_flare, AFFINITY_FLOOR, AFFINITY_MAX)
     if affinity < 0:
-        return min(0.0, affinity + sentiment * t.affinity_step * t.temper_soften)
-    return _clamp(affinity + sentiment * t.affinity_step, t.affinity_floor, AFFINITY_MAX)
+        return min(0.0, affinity + sentiment * AFFINITY_STEP * t.temper_soften)
+    return _clamp(affinity + sentiment * AFFINITY_STEP, AFFINITY_FLOOR, AFFINITY_MAX)
 
 
 def mood_words(valence: float, arousal: float) -> str:
@@ -112,7 +112,7 @@ def mood_words(valence: float, arousal: float) -> str:
 def affinity_words(affinity: float) -> str:
     if affinity >= 60:
         return "很喜欢"
-    if affinity >= 25:
+    if affinity >= AFFINITY_LIKE:
         return "有好感"
     if affinity > -15:
         return "一般"

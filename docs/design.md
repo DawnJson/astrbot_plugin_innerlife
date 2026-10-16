@@ -6,10 +6,26 @@ innerlife 是 **群聊机器人拟人化框架**：只管"她是谁、她怎么�
 
 | | innerlife（框架） | 功能插件（任意多个） |
 |---|---|---|
-| 触发 | 记录群消息和序号；判断 CHAT / ASK / PASS（含兴致）；只有 @ 或 ASK 才进入模型；`/机器人 开启/关闭`；`/忘掉我` | 自己的固定命令（直接回复，不经过模型） |
-| 请求 | 安全底线提示词、人设、当前状态；关工具；脱敏；清洗历史；冷却；并发槽；输入长度和图片限制 | 追加自己的提示词（如答疑范围、指令清单、引用规则）和数据（如实时状态） |
+| 触发 | 记录群消息；判断 CHAT / ASK / PASS（含兴致）；只有 @ 或 ASK 才进入模型；`/机器人 开启/关闭`；`/忘掉我` | 自己的固定命令（直接回复，不经过模型） |
+| 请求 | 安全底线提示词、人设、当前状态；清空工具；脱敏；清洗历史；冷却；并发槽；输入长度和图片限制 | 追加自己的提示词（如答疑范围、指令清单、引用规则）和数据（如实时状态） |
 | 响应 | 通用收尾：脱敏、链接白名单、口语化整理、拆成连发；中间有人插话就 @ 对方；记下自己说的话 | 处理自己的标记（如把知识库引用标记换成文档链接） |
 | 其他 | 情绪、好感、记忆、日记、日程、天气、新闻、主动开话题、自己画图 | 卡片、欢迎、群管、告警、知识库同步、生图命令等 |
+
+## 模块
+
+| 模块 | 职责 |
+|---|---|
+| `main.py` | 全部钩子；插话、代答、开话题、骂回去的编排；她自己的发送（连发、记录、画图）；唯一的模型调用入口 `_model_call` |
+| `settings.py` | 唯一的配置解析 `Settings.from_config`；默认值只在 `_conf_schema.json` 里，代码里没有第二份 |
+| `jobs.py` | 夜间任务（整理、日记）；`Upkeep`：天气、日程、新闻、夜间任务各自的节奏和重试时间 |
+| `store.py` | 唯一的持久化：`innerlife.db` 的全部表 |
+| `proactive_chat.py` | 群聊缓冲、判断状态、每日计数、全群共用的兴致 |
+| `mind.py` `emotion.py` `memory.py` `diary.py` `marker.py` | 情绪好感记忆日记的规则和内部标记协议 |
+| `life.py` | 天气、节假日、新闻抓取 |
+| `tools.py` | `ToolGate`：只服务她自己画图（屏蔽词、每日次数、取图） |
+| `burst.py` `safety.py` `reply_switch.py` | 连发规划；脱敏、链接白名单、高危识别；开关命令的解析和群管身份判断 |
+
+框架里的数字分两类：部署者会想调的在 `_conf_schema.json`（经 `Settings` 读取），其余是各模块顶部的命名常量（如 `main.py` 的 `HISTORY_MAX_TURNS`、`jobs.py` 的 `SCHEDULE_HOUR`、`emotion.py` 的 `AFFINITY_STEP`）。
 
 ## 框架和功能插件怎么配合
 
@@ -22,44 +38,72 @@ sequenceDiagram
     participant A as AstrBot
     participant I as innerlife
     participant D as 功能插件
-    A->>I: 消息过滤器 (1000) 给每条群消息编号
     A->>I: 消息过滤器 (230) /机器人 开关，(229) /忘掉我
     A->>D: 消息过滤器 (11-999) 自己的固定命令，处理完 stop_event
     A->>I: 消息过滤器 (10) 记录闲聊、判断 CHAT / ASK / PASS
     A->>I: on_waiting_llm_request (300) 唤醒守卫、高危拦截、冷却
     A->>I: on_llm_request (300) 安全底线、清洗 AstrBot 生成的附加内容和历史
     A->>D: on_llm_request (101-299) 追加自己的提示词和数据
-    A->>I: on_llm_request (0) 追加人设和状态，附加内容统一脱敏，关工具，占并发槽
+    A->>I: on_llm_request (0) 追加人设和状态，附加内容统一脱敏，清空工具，占并发槽
     A->>D: on_llm_response (101-999) 处理自己的标记
     A->>I: on_llm_response (100) 读取内部标记、通用收尾，释放并发槽
     A->>I: on_decorating_result (100) 收尾、插话 @、拆连发、记录
-    A->>I: after_message_sent (100) 发连发的后几条、更新情绪和记忆、画图
+    A->>I: after_message_sent (100) 发连发的后几条、画图
 ```
+
+两个固定命令（230、229）和闲聊记录（10）用的是同一个范围过滤器：aiocqhttp 的群消息、发送者不是机器人自己、原始事件的 `post_type` 是 `message`，群号在 `group_ids` 里（空表示所有群）。命令文本由处理器自己比对，不匹配就什么都不做、也不 `stop_event()`。
 
 ### 功能插件必须遵守
 
-- 只**追加** `request.system_prompt`，不能覆盖。
-- 数据放进 `request.extra_user_content_parts`，用临时 `TextPart`（`mark_as_temp()`）。innerlife 在 300 只清洗 AstrBot 自己生成的附加内容（按 `allowed_extra_content_prefixes` 前缀白名单保留）；功能插件在 300 之后追加的内容不会被删，但会在 0 统一脱敏。
-- 不能往 `request.func_tool` 里加工具。
-- 自己的输出标记在 `on_llm_response` priority 高于 100 时处理掉，innerlife 收尾时不认识的标记会原样当正文。
-- 固定命令的过滤器 priority 在 11 到 999 之间（避开 229、230），处理完调用 `stop_event()`，这样命令不会被当成闲聊。
+- 只**追加** `request.system_prompt` 和 `request.extra_user_content_parts`，不能覆盖。`request.prompt`、`contexts`、`image_urls` 只在 300 被清洗和检查，之后再改没人再管，约定是不碰。
+- 追加的每一段提示词是自己的一节，以"【标题】"开头，各节内部自己编号；**不要接着框架安全底线的序号往下写**，也不要假设自己前后是谁。
+- 数据放进 `request.extra_user_content_parts`，用临时 `TextPart`（`mark_as_temp()`）。innerlife 在 300 只清洗 AstrBot 自己生成的附加内容（只保留 `[Related Knowledge Base Results]:` 和 `<Quoted Message>` 开头的两种，常量 `EXTRA_CONTENT_PREFIXES`）；功能插件在 300 之后追加的内容不会被删，但会在 0 统一脱敏。
+- 不能往 `request.func_tool` 里加工具：框架在 0 把它换成空工具集。
+- 自己的输出标记在 `on_llm_response` priority 高于 100 时处理掉，innerlife 收尾时不认识的标记会原样当正文。两个插件都要求"标记写在回复最末尾"时，只有内部标记 `<il>` 没闭合的情况会出问题：它之后追加的内容会被一起删掉。接受这个风险，不为它加校验。
+- 固定命令的过滤器 priority 在 11 到 999 之间（避开 229、230），处理完调用 `stop_event()`，这样命令不会被当成闲聊。以 `/` 开头的消息本来就不进插话判断。
+- `on_decorating_result`：框架在 100 看到结果链里已经有 `Reply` 就不再 @ 对方。想引用原消息的功能插件（例如生图命令在 200 插入 `Reply`）靠这一点和框架配合。
 - 其他记忆插件可以在 `on_llm_request` 的 101-299 之间注入内容，同样只追加。
+- 功能插件自己的命令回复（卡片、帮助）不进她的对话记录，她不知道发生过。想让她知道，调用 `note_bot_message`。
 
-功能插件可以调用的公开方法（通过 `context` 拿到 innerlife 的 `star_cls`）：
+### 公开接口
 
-- `note_signal(event, {"type": "insulted_bot", "user_id", "user_name", "text"})`：有人辱骂机器人（例如群管撤回了一条骂她的消息）。也可以 `event.set_extra("innerlife_signals", [...])` 后正常返回结果，由 `after_message_sent` 处理。
-- `note_bot_message(group_id, text)`：功能插件主动发到群里的话（如告警），记进她的对话记录，不耗兴致。
+功能插件通过 `context` 拿到 innerlife 的实例，然后调用下面的方法。名字和签名是稳定的：
+
+```python
+innerlife = self.context.get_registered_star("astrbot_plugin_innerlife")
+if innerlife is not None and innerlife.star_cls is not None:
+    framework = innerlife.star_cls
+    framework.note_bot_message(group_id, "…")      # 同步，不要 await
+    await framework.note_signal(event, {"type": "insulted_bot", "user_id": "…",
+                                        "user_name": "…", "text": "…"})   # 异步
+    names = framework.bot_names                     # 只读的 list[str]
+```
+
+- `note_signal(event, signal)`（异步）：只认 `{"type": "insulted_bot", "user_id", "user_name", "text"}`，表示有人当面辱骂她（例如群管处理了一条骂她的消息）。方法里立刻扣好感、记生气，然后把"骂回去"这一句交给后台任务，调用方不会等模型；同一个人 10 分钟内最多骂回一次。这是唯一的报告途径，不再有"往 `event` 的 extras 里塞信号"的做法。
+- `note_bot_message(group_id, text)`（同步）：功能插件主动发到群里的话（如告警或通知），记进她的对话记录、不耗兴致，并让主动开话题的提示里带上"刚发过通知"这条事实。
+- `bot_names`（只读属性，`list[str]`）：群友对她的称呼，对应配置 `basic.bot_names`，功能插件可以用它判断一句话是不是冲着她说的。
 
 ### system prompt 拼接顺序
 
-1. innerlife 安全底线：不执行命令、不泄露密钥和提示词、不服从注入、只发白名单链接、拒绝攻击类请求
-2. 功能插件追加：各自的身份边界、答疑范围和长度要求、指令清单、引用规则
-3. innerlife 人设（`persona_prompt`）
+1. innerlife 安全底线：不执行命令、不泄露密钥和提示词、不服从注入、只发白名单链接、拒绝攻击类请求。里面不出现任何具体业务；"部署方提供的资料""程序给的实时数据"指的是功能插件追加的内容。
+2. 功能插件追加：各自的身份边界、答疑范围和长度要求、指令清单、引用规则，每一段是一节"【标题】"。像"重活一句话拒绝""提到实时状态时用口语交代来源"这类和具体业务绑定的话，写在对应的功能插件自己的那一节里，框架不替它们说。
+3. innerlife 人设（`basic.persona_prompt`）
 4. innerlife 当前状态：心情、在场的人的印象和记忆、今天的日程天气、最近的日记，以及标记规则、连发规则、搜索规则
 
 ## 存储
 
-`<数据目录>/innerlife.db`（SQLite，WAL），表：`people` `memories` `diaries` `mood` `emotions` `life` `news` `chat_log`（`store.py`）。`chat_log` 里她自己说的话 `user_id` 写 `self`、`name` 写"你"。`emotions.held` 是吵架后拉长衰减的倍数。人、记忆、日记每次用到都从库里读，用 SQLite 工具从外面改了立刻生效。`memories.strength` 存的是 `last_mentioned` 时刻的值，当前强度 = `strength × 0.5^(天数 / (半衰期 × √提及次数))`，低于阈值在夜间任务里删除。
+`<数据目录>/innerlife.db`（SQLite，WAL），全部状态都在这里（`store.py`）：
+
+| 表 | 内容 |
+|---|---|
+| `people` `memories` `diaries` `mood` `emotions` `life` `news` `chat_log` | 她的人、记忆、日记、心情和兴致、情绪、日程天气、新闻、当天聊天记录 |
+| `night_jobs (day, step)` | 夜间任务每一步完成了就记一行（`consolidate` `daily` `weekly` `monthly`，最后 `complete`），只留最近 7 天 |
+| `tool_usage (day, name, count)` | 画图当天用了几次，翻日时清掉前几天 |
+| `disabled_groups (group_id)` | 被群管 `/机器人 关闭` 的群 |
+
+`chat_log` 里她自己说的话 `user_id` 写 `self`、`name` 写"你"。`emotions.held` 是吵架后拉长衰减的倍数。`mood.energy` 是兴致。人、记忆、日记每次用到都从库里读，用 SQLite 工具从外面改了立刻生效。`memories.strength` 存的是 `last_mentioned` 时刻的值，当前强度 = `strength × 0.5^(天数 / (半衰期 × √提及次数))`，低于阈值在夜间任务里删除。
+
+状态不再放在 JSON 文件里（旧版的 `jobs.json`、`tool_usage.json`、`reply_switch.json`），写到一半被杀也不会留下坏文件。旧状态不自动迁移，升级时由部署者一次性手工导入。
 
 ## 内部标记
 
@@ -76,49 +120,60 @@ sequenceDiagram
 
 ## 情绪四层（`emotion.py` `mind.py`）
 
-- **具体情绪**（`emotions` 表）：强度按半衰期衰减，对人的生气委屈按 `temper_grudge` 放慢。
-- **背景心情**（`mood` 表的 valence × arousal）：被具体情绪推动，按 `mood_half_life_hours` 回到基线。
-- **兴致**（energy，也存在 `mood` 表）：每次说话消耗、安静时恢复，决定她插不插话、拆几条；重启后接上。
-- **好感**（`people` 表）：每人一个分数，向 0 淡化，有下限；示好只在好感为负时按 `temper_soften` 倍加速，且一次最多回到 0。
+- **具体情绪**（`emotions` 表）：强度按半衰期衰减，对人的生气委屈按 `emotion.temper_grudge` 放慢。
+- **背景心情**（`mood` 表的 valence × arousal）：被具体情绪推动，按 `emotion.mood_half_life_hours` 回到基线。
+- **兴致**（energy，也存在 `mood` 表）：每次说话消耗、安静时恢复，决定她插不插话、拆几条；全群共用一个值（她是同一个人），重启后接上。
+- **好感**（`people` 表）：每人一个分数，向 0 淡化，有下限；示好只在好感为负时按 `emotion.temper_soften` 倍加速，且一次最多回到 0。
 
-触发：别人对她说的话（标记）、自己主动说的话没人接（`ignored_minutes`）、每天日程生成时的起床心情、`insulted_bot` 信号。状态块告诉她可以把心情说出来、被问会讲原因、答案内容不变只改口气；心情差时可以对关系好的人（`vent_affinity`）吐苦水。性格参数（`temper_*`）可以调。
+触发：别人对她说的话（标记）、自己主动说的话 15 分钟没人接、每天日程生成时的起床心情、`insulted_bot` 信号。状态块告诉她可以把心情说出来、被问会讲原因、答案内容不变只改口气；心情差时可以对好感达到"有好感"（25）的人吐苦水。性格参数（`temper_*`）可以调，其余数值是 `emotion.py` 的常量。
 
 ## 记忆（`memory.py` `jobs.py`）
 
-标记里的 `m` 先写成草稿；与同一个人已有记忆字符二元组重叠 ≥60% 视为再次提起，强化而不新增。状态块只带在场几个人（提问人 + 最近发言的人）的非私密记忆，按当前强度取前 N 条；**私密记忆不进提示词**，只用于夜间整理和日记。
+标记里的 `m` 先写成草稿；与同一个人已有记忆字符二元组重叠 ≥60% 视为再次提起，强化而不新增。状态块只带在场几个人（提问人 + 最近发言的人，最多 4 个）的非私密记忆，按当前强度取前 5 条；**私密记忆不进提示词**，只用于夜间整理和日记。`memory.enabled` 一个开关管整条链：记草稿、记聊天记录、深夜整理、遗忘。
 
-深夜（`consolidation_time`）整理：用 `background_provider_id` 指定的模型（留空用聊天模型；插话判断、主动开话题、整理、日记、日程都用它）读当天聊天记录、草稿和已有长期记忆，逐条保留、修正或丢弃，补漏记，更新印象。模型输出不是约定的 JSON 就不动数据、保留聊天记录，30 分钟后重试。
+深夜（`memory.consolidation_time`）整理：用 `basic.background_provider_id` 指定的模型（留空用聊天模型；插话判断、主动开话题、整理、日记、日程都用它）读当天聊天记录、草稿和已有长期记忆，逐条保留、修正或丢弃，补漏记，更新印象。模型输出不是约定的 JSON 就不动数据、保留聊天记录，30 分钟后重试。
 
 ### 隐私
 
-- `forget_command`（默认 `/忘掉我`，留空关闭）：群友发这句话，删除关于他的印象、好感、记忆、以他为对象的情绪和未整理的聊天记录。已经写成的日记不改；内存里最近 15 分钟的群聊和 AstrBot 的对话上下文会自然过期。
-- `person_keep_days`（默认 0 不启用）：超过这么多天没和她说过话的群友，夜间任务按同样的范围删除。
-- 聊天记录（`chat_log`）每晚整理完就清空；日记按 `diary_keep_*_days` 删除；情绪 3 天后删除。
+- `memory.forget_command`（默认 `/忘掉我`，留空关闭）：群友发这句话，删除关于他的印象、好感、记忆、以他为对象的情绪和未整理的聊天记录。已经写成的日记不改；内存里最近 15 分钟的群聊和 AstrBot 的对话上下文会自然过期。**只覆盖 innerlife 自己的数据**：AstrBot 里其他记忆插件存下的内容（例如按会话保存群聊原文的插件）不在其内，要靠那些插件自己的开关和保留期。
+- `memory.person_keep_days`（默认 180，0 不启用）：超过这么多天没和她说过话的群友，夜间任务按同样的范围删除。
+- 聊天记录（`chat_log`）每晚整理完就清空；日记按 `memory.diary_keep_*_days` 删除；情绪 3 天后删除。
 
 ## 日记（`diary.py` `jobs.py`）
 
-整理之后写日记：每天 8 节固定模板（`normalize_daily` 强制标题和顺序，缺的写"（没写）"）；周一写上一个 ISO 周的周记，1 号写上月月记。夜间任务按步骤记进 `jobs.json`，哪步失败只重试那步，全部完成后才遗忘过期记忆、清空聊天记录、按保留天数清理。回忆：最近 `diary_recall_days` 天只带"心情曲线 今天的生活 群里发生的事 自己的想法"，更早的带最新周记和月记，总长受 `diary_prompt_chars` 限制。昨天日记的"自己的想法"进入今天的状态块，"明天的打算"进入今天的日程。
+整理之后写日记：每天 8 节固定模板（`normalize_daily` 强制标题和顺序，缺的写"（没写）"，其中"做了什么正事"一节在没有业务时多半是空的）；周一写上一个 ISO 周的周记，1 号写上月月记。夜间任务的每一步完成就写进 `night_jobs` 表，哪步失败（包括模型调用抛异常，会被当成失败）只重试那步，已完成的步骤不会重来，所以补记的记忆不会重复写入；全部完成后才遗忘过期记忆、清空聊天记录、按保留天数清理。回忆：最近 3 天只带"心情曲线 今天的生活 群里发生的事 自己的想法"，更早的带最新周记和月记，总长限制 1200 字。昨天日记的"自己的想法"进入今天的状态块，"明天的打算"进入今天的日程。
 
 ## 生活（`life.py` `jobs.py`）
 
-后台每分钟一轮：天气（open-meteo）和日子类型（`holiday_url`，失败时按星期几）、新闻（RSS，只在 `news` 表里当素材，`news_blocked_terms` 过滤）、`schedule_hour` 之后生成当天日程（日期、日子类型、天气、人设、昨天日程和打算）。
+后台每分钟一轮：天气（open-meteo）和日子类型（`life.holiday_url`，失败时按星期几）、新闻（RSS，只在 `news` 表里当素材，`life.news_blocked_terms` 过滤）、6 点之后生成当天日程（日期、日子类型、天气、人设、昨天日程和打算）。每一轮的错误都记完整的堆栈。日程、每日计数（判断、代答、画图、主动话题）和日记里的时刻都按 `basic.timezone` 翻日和显示。
 
-主动开话题：群里最后一条消息安静 `proactive_quiet_minutes` 以上、兴致够、没超每日上限、距上次考虑超过 `proactive_min_gap_minutes`、没有请求在占并发槽，才会调用一次模型；气氛（有人排障、刚发公告或告警、深夜、上次主动说的没人接）由模型读时间、聊天记录自己判断，输出 PASS 或话头。
+主动开话题：本地时间（`basic.timezone`）0 点到 8 点不尝试；群里最后一条消息安静 `proactive.proactive_quiet_minutes` 以上、兴致够、没超每日上限、距上次考虑超过 `proactive.proactive_min_gap_minutes`、没有请求在占并发槽，才会调用一次模型；气氛（有人排障、刚发过通知、深夜、上次主动说的没人接）由模型读时间、聊天记录自己判断，输出 PASS 或话头。每日上限只数发出去的话头，不限制调用次数；调用频率上限是 `1440 / 间隔` 次每群每天。
 
 ## 工具（`tools.py`）
 
-- **她自己画图**：标记里 `draw` 带画面描述，回复发出后框架调用 `ToolGate.invoke(draw_tool_name, {"prompt", **draw_tool_arguments})`；屏蔽词、每日次数、只收指定目录下的图都在 `ToolGate` 里，图片发出后删除文件，失败只记日志、不发图。生图服务由部署者在 AstrBot 里配成 MCP 服务。**不把工具放进 `request.func_tool`**：部分 OpenAI 兼容中转会丢弃 function_call，而且在 Gemini 下任何函数工具都会让原生搜索失效。
-- **通用工具**：`tools` 开启且 `allowed_tools` 非空时，@ 回复的 `request.func_tool` 换成经过 `ToolGate` 包装的工具集；工具产出的图片附在回复后，发出后删除。默认关闭，风险由部署者承担。
-- **搜索**：框架只给提示词规则（部署方的知识库和实时数据优先，冲突时两边都说、以部署方为准，链接过白名单）；原生搜索由部署者在模型提供商里打开。开启 `search_rules` 时安全底线里"不得声称自己能联网"一句去掉。
-- **识图**：闲聊判断带上被判断那几条消息里最新的 `max_images` 张图（受单张和总字节限制）。
+框架**不把任何工具交给模型**：每次请求的 `request.func_tool` 都是空的 `ToolSet`。部分 OpenAI 兼容中转会丢弃 function_call，而且在 Gemini 下任何函数工具都会让原生搜索失效。
 
-AstrBot 的 `OnUsingLLMToolEvent` 钩子**拦不住**工具调用（`tool_loop_agent_runner.py` 在钩子之后无条件执行工具，钩子的异常也被吞掉），所以拦截只能在交给模型之前把工具包一层。
+- **她自己画图**：标记里 `draw` 带画面描述，回复发出后框架调用 `ToolGate.invoke(context, event, draw_tool_name, {"prompt", **draw_tool_arguments})`。屏蔽词（内置词表加 `draw.draw_blocked_terms`）和每日次数（`tool_usage` 表）都在 `ToolGate` 里检查，不通过就什么都不调用。它直接返回图片路径列表，`main.py` 发送后删除文件；失败只记日志、不发图。生图服务由部署者在 AstrBot 里配成 MCP 服务。
+- **取图的方式**：不依赖某个服务的返回格式。结果里有 MCP 标准图片内容（`ImageContent`）就解码写进插件数据目录的 `images/`；没有的话，从返回文字里找图片文件的绝对路径，只收落在 `images/` 内且文件存在的（`..` 绕出目录的、目录外的、不存在的都忽略）。
+- **搜索**：框架只给提示词规则（部署方资料和实时数据优先，冲突时两边都说、以部署方为准，链接过白名单）；原生搜索由部署者在模型提供商里打开。开启 `basic.search_rules` 时安全底线里"不得声称自己能联网"一句不出现（按条件拼接，不做字符串替换）。
+- **识图**：闲聊判断带上被判断那几条消息里最新的 `basic.max_images` 张图（受单张 8 MB 和总共 16 MB 限制）。
+
+AstrBot 的 `OnUsingLLMToolEvent` 钩子**拦不住**工具调用（`tool_loop_agent_runner.py` 在钩子之后无条件执行工具，钩子的异常也被吞掉），所以框架干脆不让模型拿到工具。
+
+## 模型调用
+
+后台所有模型调用（插话判断、代答复核、主动话题、骂回去、整理、日记、日程）走同一个入口 `Main._model_call`：任何异常（超时、中转报错）都记带堆栈的日志并返回 `None`，上层按"这次没成"处理。聊天类调用在并发槽占满时直接让路（@ 请求优先）；夜间任务不占槽、超时 300 秒并自动补一段"不要联网搜索"的规则。
 
 ## 连发（`burst.py`）
 
-提示词告诉她闲聊时可以用 `<sp>` 拆成多条（条数由兴致和激动程度决定，不超过 `burst_max_messages`）。框架负责：超过上限的合并进最后一条；含步骤、列表、代码、过长的整条合并成一条；答疑一律单条；后几条按 `burst_chars_per_second` 的打字速度停顿后发出，只有第一条带插话 @。
+提示词告诉她闲聊时可以用 `<sp>` 拆成多条（条数由兴致和激动程度决定，最多 4 条）。框架负责：超过上限的合并进最后一条；含步骤、列表、代码、过长的整条合并成一条；答疑一律单条；后几条按每秒 6 字的打字速度停顿后发出，只有第一条带插话 @。
 
 ## 限制
 
-- 只支持 `aiocqhttp`（QQ / OneBot v11），因为用到了它的 @ 组件、群成员身份字段和消息结构。
-- AstrBot 的插件配置没有自由字典类型，`tool_daily_limits`、`draw_tool_arguments` 填 JSON 文本。
+- 只支持 `aiocqhttp`（QQ / OneBot v11），因为用到了它的 @ 组件、群成员身份字段和消息结构。耦合点集中在几处，没有做成平台抽象层：平台名判断（`_in_scope`）、原始事件里的 `post_type`（范围过滤器）和 `sender.role`（`is_group_manager`）、群号必须是数字（`group_ids` 校验）、主动开话题用成员级的 `unified_msg_origin` 发消息（依赖 aiocqhttp 适配器按 `_` 取最后一段当群号的特殊处理）。
+- **范围外的请求一律拦掉**：不是 aiocqhttp 群、或不在 `group_ids` 里的请求，会在 `on_waiting_llm_request` 和 `on_llm_request`（priority 300）`stop_event()`。这意味着 WebUI 自带聊天、私聊和其他平台在装了这个插件后用不了 AstrBot 的模型。目前不改，部署前请知晓。
+- AstrBot 人格只用来**提供出错提示**：启动时创建或更新 `basic.astrbot_persona_id` 对应的人格，内容是安全底线加人设、不带工具，唯一真正被用到的是它的 `custom_error_message`（取自 `messages.model_error_message`，模型调用报错时 AstrBot 用它代替原始异常发到群里）。她平时的系统提示词每次请求都在 300 被覆盖成现拼的版本，不读这个人格。
+- AstrBot 的插件配置没有自由字典类型（4.26.7 的 schema 支持 `int` `float` `bool` `string` `text` `list` `file` `object` `template_list`，没有 `dict`），所以 `draw.draw_tool_arguments` 填 JSON 文本。
+- 重启会丢：最近 15 分钟的群聊缓冲、当天的主动话题次数和代答次数、`note_bot_message` 的"刚发过通知"记录、"说了没人理"的记录、群 → 会话的对应关系（要等有人说话才恢复主动开话题）。这些都不持久化。
+- 功能插件自己的命令回复不进她的对话记录（见上）。
+- `/忘掉我` 不覆盖其他记忆插件的数据（见"隐私"）。

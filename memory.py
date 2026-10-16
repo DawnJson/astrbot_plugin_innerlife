@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 
+from .marker import FENCE_RE
+
 MAX_STRENGTH = 3.0
+MEMORY_REINFORCE = 1.0  # strength added when a memory is brought up again
+FORGET_THRESHOLD = 0.15  # strength under which a memory is forgotten
 SAME_MEMORY_OVERLAP = 0.6
 MAX_MEMORY_CHARS = 80
 MAX_IMPRESSION_CHARS = 40
-
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 
 def effective_strength(
@@ -64,7 +65,7 @@ class Consolidation:
 def parse_consolidation(answer: str) -> Consolidation | None:
     """None when the answer is not the JSON object asked for."""
     try:
-        data = json.loads(_FENCE_RE.sub("", answer.strip()))
+        data = json.loads(FENCE_RE.sub("", answer.strip()))
     except ValueError:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("memories"), list):

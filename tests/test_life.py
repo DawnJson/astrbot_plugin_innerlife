@@ -9,12 +9,12 @@ from pathlib import Path
 
 import httpx
 
+import support  # noqa: F401  (stands in for AstrBot's logger when it is not installed)
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from life import (  # noqa: E402
-    DEFAULT_NEWS_BLOCKED_TERMS,
-    DEFAULT_NEWS_FEEDS,
     day_kind_from_weekday,
     fetch_day_kind,
     fetch_news,
@@ -165,10 +165,6 @@ class NewsTest(unittest.TestCase):
             [],
         )
         self.assertEqual([i.link for i in items], ["https://b.test/1"])
-
-    def test_defaults_are_populated(self):
-        self.assertGreaterEqual(len(DEFAULT_NEWS_FEEDS), 4)
-        self.assertTrue(DEFAULT_NEWS_BLOCKED_TERMS)
 
 
 if __name__ == "__main__":
