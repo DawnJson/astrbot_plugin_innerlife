@@ -10,6 +10,7 @@ MAX_EMOTIONS = 3
 MAX_PEOPLE = 4
 MAX_MEMORIES = 3
 MAX_NEWS = 2
+MAX_KEEP = 2
 
 _CLOSED_RE = re.compile(r"<il>(.*?)</il>", re.DOTALL | re.IGNORECASE)
 _OPEN_RE = re.compile(r"<il>(.*)$", re.DOTALL | re.IGNORECASE)
@@ -40,11 +41,19 @@ class PersonNote:
 
 
 @dataclass(frozen=True)
+class KeepNote:
+    image: int  # the number the image had in what she was shown, from 1
+    description: str
+
+
+@dataclass(frozen=True)
 class Marker:
     emotions: tuple[EmotionNote, ...] = ()
     people: tuple[PersonNote, ...] = ()
     draw: str = ""
     news: tuple[int, ...] = ()
+    keep: tuple[KeepNote, ...] = ()
+    sticker: int | None = None
 
 
 def _text(value: object, limit: int) -> str:
@@ -84,6 +93,15 @@ def _person(item: dict) -> PersonNote | None:
     return note if note.sentiment or note.impression or note.memories else None
 
 
+def _keep(item: dict) -> KeepNote | None:
+    image = item.get("i")
+    description = _text(item.get("d"), 20)
+    if isinstance(image, bool) or not isinstance(image, int) or image < 1 or not description:
+        return None
+    return KeepNote(image, description)
+
+
+
 def parse_marker(text: str) -> tuple[str, Marker]:
     """Split a model answer into the visible text and its hidden marker; garbage never raises or leaks."""
     closed = _CLOSED_RE.search(text)
@@ -97,6 +115,7 @@ def parse_marker(text: str) -> tuple[str, Marker]:
     if not isinstance(data, dict):
         return visible, Marker()
     news = data.get("news")
+    sticker = data.get("s")
     return visible, Marker(
         emotions=tuple(
             note for item in _items(data.get("e"), MAX_EMOTIONS) if (note := _emotion(item))
@@ -112,6 +131,10 @@ def parse_marker(text: str) -> tuple[str, Marker]:
                 if isinstance(number, int) and not isinstance(number, bool)
             ][:MAX_NEWS]
         ),
+        keep=tuple(
+            note for item in _items(data.get("keep"), MAX_KEEP) if (note := _keep(item))
+        ),
+        sticker=sticker if isinstance(sticker, int) and not isinstance(sticker, bool) else None,
     )
 
 
@@ -119,7 +142,9 @@ def strip_marker(text: str) -> str:
     return parse_marker(text)[0]
 
 
-def marker_rules(*, emotion: bool, memory: bool, draw: bool, news: bool = False) -> str:
+def marker_rules(
+    *, emotion: bool, memory: bool, draw: bool, news: bool = False, keep: bool = False, stickers: str = ""
+) -> str:
     """Prompt text teaching the hidden marker; empty when nothing would be read from it."""
     fields = []
     if emotion:
@@ -147,6 +172,17 @@ def marker_rules(*, emotion: bool, memory: bool, draw: bool, news: bool = False)
         )
     if news:
         fields.append("news：你聊到了上面哪几条新闻，写编号列表。")
+    if keep:
+        fields.append(
+            "keep：消息里的图片如果是你真心喜欢的表情包、梗图（以后能当反应图发出去的那种），可以收藏，一次最多 2 张，"
+            "每项 {\"i\":图片编号（按图片在消息里出现的顺序，从 1 开始）,\"d\":这张图表达什么情绪、什么时候用，20字内}。"
+            "只收表情包和梗图；真人照片、带个人信息的截图、色情暴力政治广告类的图一律不收；不是每张都收，没有喜欢的就不写。"
+        )
+    if stickers:
+        fields.append(
+            "s：想在话后面发一张你收藏的表情包时，写它的编号（只能用下面列表里的）；只想发表情包就让正文留空、只写这一项。别每次都发。\n"
+            "你收藏的表情包（编号. 用途）：\n" + stickers
+        )
     if not fields:
         return ""
     return (

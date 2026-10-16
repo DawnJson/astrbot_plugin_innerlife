@@ -32,7 +32,6 @@ class Settings:
     astrbot_persona_id: str
     persona_prompt: str
     bot_names: list[str]
-    support_scope: str
     allowed_link_domains: tuple[str, ...]
     secret_env_vars: list[str]
     switch_command: str
@@ -103,13 +102,18 @@ class Settings:
     # burst
     burst: bool
 
+    # stickers
+    stickers: bool
+    sticker_max_count: int
+    sticker_max_bytes: int
+
     @classmethod
     def from_config(cls, config: dict) -> Settings:
-        basic, messages, emo, mem, life, pro, talk, draw, burst = (
+        basic, messages, emo, mem, life, pro, talk, draw, burst, sticker = (
             config[group]
             for group in (
                 "basic", "messages", "emotion", "memory", "life", "proactive", "talk", "draw",
-                "burst",
+                "burst", "sticker",
             )
         )
         group_ids = frozenset(_list(basic["group_ids"]))
@@ -130,7 +134,6 @@ class Settings:
             astrbot_persona_id=persona_id,
             persona_prompt=str(basic["persona_prompt"]).strip(),
             bot_names=_list(basic["bot_names"]),
-            support_scope=str(basic["support_scope"]).strip(),
             allowed_link_domains=tuple(
                 domain.casefold().strip(".") for domain in _list(basic["allowed_link_domains"])
             ),
@@ -194,4 +197,7 @@ class Settings:
             draw_daily_limit=int(draw["draw_daily_limit"]),
             draw_blocked_terms=_list(draw["draw_blocked_terms"]),
             burst=bool(burst["enabled"]),
+            stickers=bool(sticker["enabled"]),
+            sticker_max_count=int(sticker["max_count"]),
+            sticker_max_bytes=int(sticker["max_bytes"]),
         )

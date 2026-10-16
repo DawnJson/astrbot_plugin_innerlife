@@ -8,7 +8,7 @@ from astrbot_plugin_innerlife import talk
 from astrbot_plugin_innerlife.talk import TalkState
 
 QUIET = dict(
-    mention=False, reply=False, question=False, scoped=False,
+    mention=False, reply=False, question=False,
     affinity=0.0, arousal=0.3, energy=60.0, count=1,
 )
 
@@ -22,13 +22,12 @@ class GateTests(unittest.TestCase):
         base = talk.probability(logit(), 1.0)
         self.assertGreater(talk.probability(logit(mention=True), 1.0), base)
         self.assertGreater(talk.probability(logit(reply=True), 1.0), talk.probability(logit(mention=True), 1.0))
-        self.assertGreater(talk.probability(logit(question=True, scoped=True), 1.0),
-                           talk.probability(logit(question=True), 1.0))
+        self.assertGreater(talk.probability(logit(question=True), 1.0), base)
 
     def test_formula_matches_the_contract(self) -> None:
         state = TalkState(bias=-3.0, heat=0.4)
-        z = logit(state, mention=True, question=True, scoped=True, affinity=50.0, energy=50.0, count=4)
-        expected = -3.0 + 2.0 + 1.6 + 0.5 + 0.8 * 0.3 + math.log(0.5) + 0.4 + 0.5 * math.log(4)
+        z = logit(state, mention=True, question=True, affinity=50.0, energy=50.0, count=4)
+        expected = -3.0 + 2.0 + 0.8 + 0.5 + 0.8 * 0.3 + math.log(0.5) + 0.4 + 0.5 * math.log(4)
         self.assertAlmostEqual(z, expected)
         self.assertAlmostEqual(talk.probability(z, 1.0), 1 / (1 + math.exp(-expected)))
         # Affinity is clamped to [-0.6, 1] and tiredness to a floor of 5%.

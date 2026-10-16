@@ -5,13 +5,11 @@ import unittest
 
 import support  # noqa: F401  (puts the plugin's parent on sys.path)
 from astrbot_plugin_innerlife.proactive_chat import (  # noqa: E402
-    ASK,
     BURST_MESSAGES,
+    CHATTER_PROMPT,
     ENERGY_COST_RANGE,
     MOODS,
     ProactiveChat,
-    chatter_prompt,
-    parse_judgement,
     parse_reply,
 )
 
@@ -20,10 +18,8 @@ def new_chat(stamina_minutes: float = 45.0) -> ProactiveChat:
     return ProactiveChat(stamina_minutes)
 
 
-def record(chat: ProactiveChat, speaker: str, text: str, now: float, *, ask: bool = False):
-    return chat.record(
-        "1", speaker, text, now, sender_id=speaker, awaits_verdict=ask
-    )
+def record(chat: ProactiveChat, speaker: str, text: str, now: float, *, pending: bool = False):
+    return chat.record("1", speaker, text, now, sender_id=speaker, pending=pending)
 
 
 class ParseTests(unittest.TestCase):
@@ -35,46 +31,13 @@ class ParseTests(unittest.TestCase):
                 self.assertIsNone(parse_reply(rejected))
 
 
-class JudgementTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ask_maps_to_pending_lines_only(self) -> None:
-        chat = new_chat()
-        asked = record(chat, "甲", "怎么配置", 1.0, ask=True)
-        done = record(chat, "乙", "另一个问题", 2.0, ask=True)
-        done.verdict.set_result(None)
-        chatter = record(chat, "丙", "闲聊", 3.0)
-        entries = [asked, done, chatter]
-
-        targets, line = parse_judgement("ASK 1 2 3 9 1", entries)
-        self.assertEqual(targets, [asked])
-        self.assertIsNone(line)
-
-        chat.finish_judgement(entries, targets)
-        self.assertEqual(await asked.verdict, ASK)
-
-    async def test_without_a_scope_ask_never_comes_out(self) -> None:
-        chat = new_chat()
-        asked = record(chat, "甲", "怎么配置", 1.0, ask=True)
-        self.assertEqual(parse_judgement("ASK 1", [asked], allow_ask=False), ([], None))
-        self.assertEqual(
-            parse_judgement("哈哈", [asked], allow_ask=False), ([], "哈哈")
-        )
-        self.assertEqual(parse_judgement("PASS", [asked]), ([], None))
-
-    def test_prompt_options_follow_the_support_scope(self) -> None:
-        with_scope = chatter_prompt("手机 / 电脑")
-        self.assertIn("只输出下面三种之一", with_scope)
-        self.assertIn("1. ASK 编号：有群友在问 手机 / 电脑相关的问题", with_scope)
-        self.assertIn("3. PASS：", with_scope)
-        self.assertTrue(
-            with_scope.endswith("只输出“ASK 编号”、PASS 或要发的那句话本身，不要任何解释。")
-        )
-
-        without_scope = chatter_prompt("")
-        self.assertIn("只输出下面两种之一", without_scope)
-        self.assertNotIn("ASK", without_scope)
-        self.assertIn("1. 要发的那句话：", without_scope)
-        self.assertIn("2. PASS：", without_scope)
-        self.assertTrue(without_scope.endswith("只输出 PASS 或要发的那句话本身，不要任何解释。"))
+class JudgementTests(unittest.TestCase):
+    def test_prompt_offers_a_line_or_pass_only(self) -> None:
+        self.assertIn("只输出下面两种之一", CHATTER_PROMPT)
+        self.assertIn("1. 要发的那句话：", CHATTER_PROMPT)
+        self.assertIn("2. PASS：", CHATTER_PROMPT)
+        self.assertNotIn("3. ", CHATTER_PROMPT)
+        self.assertTrue(CHATTER_PROMPT.endswith("只输出 PASS 或要发的那句话本身，不要任何解释。"))
 
 
 class ChatStateTests(unittest.IsolatedAsyncioTestCase):
@@ -87,28 +50,27 @@ class ChatStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_judgement_covers_recent_lines_once(self) -> None:
         chat = new_chat()
         self.assertIsNone(chat.begin_judgement("1", 1.0))
-        record(chat, "甲", "很久以前", 0.0, ask=True)
-        fresh = record(chat, "乙", "刚才", 1000.0, ask=True)
+        record(chat, "甲", "很久以前", 0.0, pending=True)
+        fresh = record(chat, "乙", "刚才", 1000.0, pending=True)
         entries = chat.begin_judgement("1", 1000.0)
         self.assertEqual(entries, [fresh])
         self.assertIsNone(chat.begin_judgement("1", 1000.0))
         self.assertEqual(chat.numbered_transcript(entries), "1. 乙：刚才")
-        chat.finish_judgement(entries, [])
-        self.assertIsNone(await fresh.verdict)
+        self.assertEqual(chat.fresh(entries), [fresh])
+        chat.finish_judgement(entries)
+        self.assertEqual(chat.fresh(entries), [])
 
     async def test_burst_latest_and_later_messages(self) -> None:
         chat = new_chat()
-        first = record(chat, "甲", "一", 1.0, ask=True)
+        first = record(chat, "甲", "一", 1.0, pending=True)
         for index in range(BURST_MESSAGES - 1):
-            last = record(chat, "乙", str(index), 2.0 + index, ask=True)
+            last = record(chat, "乙", str(index), 2.0 + index, pending=True)
         self.assertTrue(chat.burst_full("1"))
         self.assertTrue(chat.is_latest("1", last))
         self.assertFalse(chat.is_latest("1", first))
         self.assertEqual(chat.later_messages("1", first), BURST_MESSAGES - 1)
         chat.record_reply("1", "我说话了", 20.0)
         self.assertEqual(chat.later_messages("1", first), BURST_MESSAGES - 1)
-        self.assertTrue(chat.others_active("1", first))
-        self.assertIn("你：我说话了", chat.thread_from("1", first))
 
 
 class EnergyTests(unittest.IsolatedAsyncioTestCase):

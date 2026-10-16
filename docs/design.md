@@ -6,7 +6,7 @@ innerlife 是 **群聊机器人拟人化框架**：只管"她是谁、她怎么�
 
 | | innerlife（框架） | 功能插件（任意多个） |
 |---|---|---|
-| 触发 | 记录群消息；判断 CHAT / ASK / PASS（含兴致）；只有 @ 或 ASK 才进入模型；`/机器人 开启/关闭`；`/忘掉我` | 自己的固定命令（直接回复，不经过模型） |
+| 触发 | 记录群消息；判断闲聊一句还是 PASS（含兴致）；只有 @ 或功能插件设了 `innerlife_answer` 的消息才进入 @ 回答；`/机器人 开启/关闭`；`/忘掉我` | 自己的固定命令（直接回复，不经过模型）；自己判断要不要代答，再用 `innerlife_answer` 交给框架 |
 | 请求 | 安全底线提示词、人设、当前状态；清空工具；脱敏；清洗历史；冷却；并发槽；输入长度和图片限制 | 追加自己的提示词（如答疑范围、指令清单、引用规则）和数据（如实时状态） |
 | 响应 | 通用收尾：脱敏、链接白名单、口语化整理、拆成连发；中间有人插话就 @ 对方；记下自己说的话 | 处理自己的标记（如把知识库引用标记换成文档链接） |
 | 其他 | 情绪、好感、记忆、日记、日程、天气、新闻、主动开话题、自己画图 | 卡片、欢迎、群管、告警、知识库同步、生图命令等 |
@@ -15,11 +15,12 @@ innerlife 是 **群聊机器人拟人化框架**：只管"她是谁、她怎么�
 
 | 模块 | 职责 |
 |---|---|
-| `main.py` | 全部钩子；插话、代答、开话题、骂回去的编排；她自己的发送（连发、记录、画图）；唯一的模型调用入口 `_model_call` |
+| `main.py` | 全部钩子；插话、开话题、骂回去的编排；她自己的发送（连发、记录、画图、表情包）；唯一的模型调用入口 `_model_call` |
 | `settings.py` | 唯一的配置解析 `Settings.from_config`；默认值只在 `_conf_schema.json` 里，代码里没有第二份 |
 | `jobs.py` | 夜间任务（整理、日记）；`Upkeep`：天气、日程、新闻、夜间任务各自的节奏和重试时间 |
 | `store.py` | 唯一的持久化：`innerlife.db` 的全部表 |
 | `proactive_chat.py` | 群聊缓冲、判断状态、全群共用的兴致 |
+| `stickers.py` | 表情包：文件、`stickers` 表的存取、按魔数判格式、超量淘汰、挑给提示词的列表 |
 | `talk.py` | 说话量的纯公式：特征 → z → 概率，bias / 占比 / 热度 / 冲动的更新（不依赖 AstrBot） |
 | `mind.py` `emotion.py` `memory.py` `diary.py` `marker.py` | 情绪好感记忆日记的规则和内部标记协议 |
 | `life.py` | 天气、节假日、新闻抓取 |
@@ -41,7 +42,8 @@ sequenceDiagram
     participant D as 功能插件
     A->>I: 消息过滤器 (230) /机器人 开关，(229) /忘掉我
     A->>D: 消息过滤器 (11-999) 自己的固定命令，处理完 stop_event
-    A->>I: 消息过滤器 (10) 记录闲聊、判断 CHAT / ASK / PASS
+    A->>I: 消息过滤器 (10) 记录闲聊、判断闲聊一句还是 PASS
+    A->>D: 消息过滤器 (低于 10) 功能插件自己的判断；要她答就设 innerlife_answer 并唤醒
     A->>I: on_waiting_llm_request (300) 唤醒守卫、高危拦截、冷却
     A->>I: on_llm_request (300) 安全底线、清洗 AstrBot 生成的附加内容和历史
     A->>D: on_llm_request (101-299) 追加自己的提示词和数据
@@ -49,7 +51,7 @@ sequenceDiagram
     A->>D: on_llm_response (101-999) 处理自己的标记
     A->>I: on_llm_response (100) 读取内部标记、通用收尾，释放并发槽
     A->>I: on_decorating_result (100) 收尾、插话 @、拆连发、记录
-    A->>I: after_message_sent (100) 发连发的后几条、画图
+    A->>I: after_message_sent (100) 发连发的后几条、表情包、画图
 ```
 
 两个固定命令（230、229）和闲聊记录（10）用的是同一个范围过滤器：aiocqhttp 的群消息、发送者不是机器人自己、原始事件的 `post_type` 是 `message`，群号在 `group_ids` 里（空表示所有群）。命令文本由处理器自己比对，不匹配就什么都不做、也不 `stop_event()`。
@@ -82,7 +84,9 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 - `note_signal(event, signal)`（异步）：只认 `{"type": "insulted_bot", "user_id", "user_name", "text"}`，表示有人当面辱骂她（例如群管处理了一条骂她的消息）。方法里立刻扣好感、记生气，然后把"骂回去"这一句交给后台任务，调用方不会等模型；同一个人 10 分钟内最多骂回一次。这是唯一的报告途径，不再有"往 `event` 的 extras 里塞信号"的做法。
 - `note_bot_message(group_id, text)`（同步）：功能插件主动发到群里的话（如告警或通知），记进她的对话记录、不耗兴致，并让主动开话题的提示里带上"刚发过通知"这条事实。
+- `her_lines(group_id, since)`（同步）：她自己在这个群里发出的话，从 `since`（`time.monotonic()` 的时刻）起，返回 `[(monotonic 时刻, 文字), ...]`，来自她已有的内存群聊缓冲（最近 30 条，重启即空），闲聊、连发的每一条、@ 回答和 `note_bot_message` 都在里面。功能插件拼"这个问题后来有没有人答"这类上下文时用它，不需要自己监听她的发送。
 - `bot_names`（只读属性，`list[str]`）：群友对她的称呼，对应配置 `basic.bot_names`，功能插件可以用它判断一句话是不是冲着她说的。
+- `innerlife_answer`（事件 extra，公开且稳定的名字）：功能插件想让一条**没 @ 她**的群消息按"被 @"的方式回答时，在自己的消息过滤器（priority 要**低于** innerlife 的闲聊记录 10，让 innerlife 先记录、不被拖慢）里对这个事件做两件事：`event.set_extra("innerlife_answer", True)` 和 `event.is_at_or_wake_command = True`。之后这条消息走她平常的 @ 回答路径：人设和状态、安全底线、并发槽、冷却、回复开关、不拆连发，回复开关关着的群或每日熔断到了的群照样被守卫拦下；这次模型调用计入框架的熔断。没设这个 extra 时，没 @ 她的消息永远到不了 @ 路径。判断"该不该答、什么时候答、答什么范围"是功能插件自己的事（例如先等几十秒看有没有人答，再问一次模型），框架不提供也不关心。
 
 ### system prompt 拼接顺序
 
@@ -104,6 +108,7 @@ if innerlife is not None and innerlife.star_cls is not None:
 | `talk (group_id, bias, her, total, heat, urge, updated_at)` | 每群的说话状态，见"说话量"；一直保留 |
 | `talk_log (at, group_id, kind, p, outcome, features)` | 说话决策日志，只留 14 天 |
 | `model_calls (group_id, day, hour, count)` | 每群后台聊天调用的熔断计数，只留当天 |
+| `stickers (id, sha256, file, description, saved_at, used_count, last_used)` | 她收藏的表情包，见"表情包"；`file` 是 `<数据目录>/stickers/` 里的文件名 |
 
 `chat_log` 里她自己说的话 `user_id` 写 `self`、`name` 写"你"。`emotions.held` 是吵架后拉长衰减的倍数。`mood.energy` 是兴致。人、记忆、日记每次用到都从库里读，用 SQLite 工具从外面改了立刻生效。`memories.strength` 存的是 `last_mentioned` 时刻的值，当前强度 = `strength × 0.5^(天数 / (半衰期 × √提及次数))`，低于阈值在夜间任务里删除。`talk.updated_at` 是该群状态上次推进到的时刻（秒），`her` `total` `heat` 都是推进到那时的值。
 
@@ -119,6 +124,8 @@ if innerlife is not None and innerlife.star_cls is not None:
 | `p` | 对说话人的记录 `{n 昵称, s 对她本人的态度-2..2, imp 一句话印象, m:[{t 概括, x 私人}]}`。@ 回复里没写昵称就是提问人；闲聊判断里只认出现在记录里的昵称 |
 | `draw` | 她想画的画面描述 |
 | `news` | 主动话题里用了哪几条新闻的编号 |
+| `keep` | 她从看到的图里收藏的表情包，最多 2 项 `{i 图片编号, d 用途}`，见"表情包" |
+| `s` | 要在这条话后面发的表情包编号，见"表情包" |
 
 只有对她本人说的话才影响好感（提示词规定，转述和朋友间玩笑写 0）。
 
@@ -152,11 +159,10 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 1. 模型槽已满（有 @ 请求在占）：直接返回，**不消费**这批消息——它们仍等着判断，之后的消息会连它们一起判断。记日志 `busy`。
 2. 熔断到了：这批消息的结果置 `None`，不调用模型。记日志 `fuse`。
-3. 对本批**新**消息（还没被判断过的）算特征：`A` 有消息含她的名字（`basic.bot_names`，不分大小写）；`R` 有人回复或引用了她（收到消息时从 `Reply` 组件的发送者认出）；`Q` 有问句（含 `?`/`？`或"什么 怎么 为什么 吗 能不能"等常见疑问词，`talk.is_question`；权重 0.8，配置了 `basic.support_scope` 时 1.6）；`aff` 本批发言人里最高的好感 / 100，夹在 [−0.6, 1]；`arousal` 当前心情激动度（0–1）；`B = max(energy / 100, 0.05)`；`n` 本批新消息条数。
+3. 对本批**新**消息（还没被判断过的）算特征：`A` 有消息含她的名字（`basic.bot_names`，不分大小写）；`R` 有人回复或引用了她（收到消息时从 `Reply` 组件的发送者认出）；`Q` 有问句（含 `?`/`？`或"什么 怎么 为什么 吗 能不能"等常见疑问词，`talk.is_question`；权重 0.8）；`aff` 本批发言人里最高的好感 / 100，夹在 [−0.6, 1]；`arousal` 当前心情激动度（0–1）；`B = max(energy / 100, 0.05)`；`n` 本批新消息条数。
 
-   `z = bias + 2.0·A + 2.2·R + Qw·Q + 1.0·aff + 0.8·arousal + ln B + heat + 0.5·ln n`，`p = 1 / (1 + exp(−z / talk.temperature))`。
-4. 掷骰 `random() < p` 才继续，否则这批结果置 `None`、不调用模型，记 `skip`。例外：配置了 `basic.support_scope` 且新消息里有提问时不掷骰（`p = 1`，日志特征里 `forced: question`），直接调用判断模型，不受心情和兴致影响；熔断和模型槽照常生效。命中后和以前一样调用判断模型（提示词不变），计入熔断；输出 PASS、ASK 或要说的话。
-5. ASK 代答没有每日上限：等人先答之后的"问题还开着吗"复核调用和代答本身也都计入熔断，熔断到了就不答。
+   `z = bias + 2.0·A + 2.2·R + 0.8·Q + 1.0·aff + 0.8·arousal + ln B + heat + 0.5·ln n`，`p = 1 / (1 + exp(−z / talk.temperature))`。
+4. 掷骰 `random() < p` 才继续，否则这批结果置 `None`、不调用模型，记 `skip`。命中后调用判断模型（提示词里只有两个选项：要发的那句话，或 PASS），计入熔断。有人提问只是 `Q` 的一项权重，和其他特征一样要过这道骰子，框架里没有"问题必答"的绕行；需要认真答疑的业务由功能插件自己判断，再用 `innerlife_answer` 交给她的 @ 回答路径（见"公开接口"）。
 
 ### 主动话题
 
@@ -164,11 +170,11 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 ### 成本熔断
 
-每个群每天后台聊天类模型调用（判断、复核、主动话题、代答本身）数到 `basic.daily_call_fuse`（默认 300）就停：不再判断闲聊、不开话题、不代答，只回 @。`0` 表示一直如此（收到消息时就不建待判断的结果）。另有常量 `HOURLY_CALL_FUSE = 30`（每群每小时）。计数存在 `model_calls` 表（`group_id, day, hour, count`），重启不清零，按 `basic.timezone` 翻日，翻日时清掉前几天；到限时记一条 warning。它是成本保险，不是控制她说多少话的旋钮。
+每个群每天后台聊天类模型调用（判断、主动话题、功能插件用 `innerlife_answer` 唤醒的回答）数到 `basic.daily_call_fuse`（默认 300）就停：不再判断闲聊、不开话题、不接功能插件的唤醒，只回 @。`0` 表示一直如此（收到消息时就不建待判断的结果）。另有常量 `HOURLY_CALL_FUSE = 30`（每群每小时）。计数存在 `model_calls` 表（`group_id, day, hour, count`），重启不清零，按 `basic.timezone` 翻日，翻日时清掉前几天；到限时记一条 warning。它是成本保险，不是控制她说多少话的旋钮。
 
 ### 决策日志
 
-`talk_log(at, group_id, kind, p, outcome, features)`：每次判断和每次命中的主动话题记一行，用来调参。`kind` 是 `chat` / `topic`；`outcome` 是 `skip`（没掷中）/ `PASS` / `CHAT` / `ASK` / `fuse` / `busy` / `fail`（模型调用失败）/ `sent`（话题发出）；`features` 是 JSON，含 `z`、各特征、`bias`、`share_now`、`heat`、`urge`、`energy`。夜间清理只留 14 天。主动话题每分钟没掷中的不记，否则每群每天 1440 行。
+`talk_log(at, group_id, kind, p, outcome, features)`：每次判断和每次命中的主动话题记一行，用来调参。`kind` 是 `chat` / `topic`；`outcome` 是 `skip`（没掷中）/ `PASS` / `CHAT`（说了一句话或只发了表情包）/ `fuse` / `busy` / `fail`（模型调用失败）/ `sent`（话题发出）；`features` 是 JSON，含 `z`、各特征、`bias`、`share_now`、`heat`、`urge`、`energy`。夜间清理只留 14 天。主动话题每分钟没掷中的不记，否则每群每天 1440 行。
 
 ### 旋钮（`talk` 分组）
 
@@ -215,9 +221,18 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 AstrBot 的 `OnUsingLLMToolEvent` 钩子**拦不住**工具调用（`tool_loop_agent_runner.py` 在钩子之后无条件执行工具，钩子的异常也被吞掉），所以框架干脆不让模型拿到工具。
 
+## 表情包（`stickers.py` `main.py`）
+
+她把群里自己真心喜欢的反应图收藏起来，之后自己发出去（是收藏的原图，不是画的）。配置组 `sticker`：`enabled`（默认开）、`max_count`（默认 200）、`max_bytes`（默认 1048576）。
+
+- **存**：文件在 `<数据目录>/stickers/<sha256>.<ext>`，`ext` 由文件头的魔数决定，只收 png / jpg / gif / webp；表是 `stickers`。
+- **收藏**：凡是她看到群图的地方（闲聊判断和 @ 回答，需要 `basic.vision`），内部标记多一个 `keep`：`[{"i": 图片编号, "d": "20 字内：表达什么情绪、什么时候用"}]`，一次最多 2 项；编号是图片在她看到的消息里的顺序，从 1 开始。提示词规定只收她真心喜欢的表情包和梗图，真人照片、带个人信息的截图、色情暴力政治广告类一律不收。代码把已经下载好的图复制进来：格式不对、超过 `max_bytes`、sha256 已存在的都跳过；超过 `max_count` 先删用得最少、其次收藏最早的一张（行和文件一起）。
+- **发**：开着并且她有表情包时，闲聊判断和 @ 回答的提示词里带最多 40 条 `编号. 用途`（用得最多的 20 条加随机抽的，所以每次不一样），标记多一个 `s`：要发的表情包编号。她的话发出去之后（连发的后几条之后、画图之前）发这张图，`used_count` 加一、`last_used` 记下，在她的对话记录里记一行 `[表情包：用途]`。可以只发表情：正文留空、只写 `s`（闲聊判断里输出 PASS 加 `s` 不发）。文件已不在的表情包不发，并删掉这一行；编号不存在就当没写。
+- 主动话题的提示词里不带表情包。
+
 ## 模型调用
 
-后台所有模型调用（插话判断、代答复核、主动话题、骂回去、整理、日记、日程）走同一个入口 `Main._model_call`：任何异常（超时、中转报错）都记带堆栈的日志并返回 `None`，上层按"这次没成"处理。聊天类调用在并发槽占满时直接让路（@ 请求优先）；夜间任务不占槽、超时 300 秒并自动补一段"不要联网搜索"的规则。其中判断、复核、主动话题和代答本身（骂回去和夜间任务不算）计入每群的成本熔断，见"说话量"。
+后台所有模型调用（插话判断、主动话题、骂回去、整理、日记、日程）走同一个入口 `Main._model_call`：任何异常（超时、中转报错）都记带堆栈的日志并返回 `None`，上层按"这次没成"处理。聊天类调用在并发槽占满时直接让路（@ 请求优先）；夜间任务不占槽、超时 300 秒并自动补一段"不要联网搜索"的规则。其中判断、主动话题和功能插件用 `innerlife_answer` 唤醒的那次回答（骂回去和夜间任务不算）计入每群的成本熔断，见"说话量"。功能插件自己的模型调用（例如答疑前的复核）走它自己的提供商，不经过这个入口，也不计入熔断。
 
 ## 连发（`burst.py`）
 

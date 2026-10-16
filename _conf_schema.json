@@ -36,12 +36,6 @@
         "hint": "用于判断群友有没有在叫她，也供功能插件读取。",
         "obvious_hint": true
       },
-      "support_scope": {
-        "description": "她会主动代答的问题范围（一句话描述）",
-        "type": "string",
-        "default": "",
-        "hint": "留空则只闲聊、不主动代答。填了之后，群里有人问了这个范围内的问题且一直没人答，她会过来答。"
-      },
       "allowed_link_domains": {
         "description": "回复里允许出现的 HTTPS 域名（含子域名）",
         "type": "list",
@@ -546,6 +540,30 @@
         "type": "bool",
         "default": true,
         "hint": "她想多说几句时拆成几条短消息，隔几秒依次发出；回答问题时仍只发一条。"
+      }
+    }
+  },
+  "sticker": {
+    "description": "表情包",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "开启收藏和发送表情包",
+        "type": "bool",
+        "default": true,
+        "hint": "她会把群里自己真心喜欢的表情包、梗图收藏起来，之后在合适的时候自己发出去（不是画的）。需要开启 basic.vision 才能看到图片。"
+      },
+      "max_count": {
+        "description": "最多收藏几张",
+        "type": "int",
+        "default": 200,
+        "hint": "超过时删除用得最少、收藏最早的那张。"
+      },
+      "max_bytes": {
+        "description": "单张图片的大小上限（字节）",
+        "type": "int",
+        "default": 1048576,
+        "hint": "只收 png、jpg、gif、webp，按文件内容判断格式。"
       }
     }
   }

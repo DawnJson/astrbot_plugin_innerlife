@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS talk_log (
   group_id TEXT NOT NULL,
   kind TEXT NOT NULL,                       -- chat / topic
   p REAL,
-  outcome TEXT NOT NULL,                    -- skip / PASS / CHAT / ASK / fuse / busy / fail / sent
+  outcome TEXT NOT NULL,                    -- skip / PASS / CHAT / fuse / busy / fail / sent
   features TEXT NOT NULL                    -- JSON
 );
 CREATE TABLE IF NOT EXISTS model_calls (
@@ -111,6 +111,15 @@ CREATE TABLE IF NOT EXISTS model_calls (
   hour TEXT NOT NULL,
   count INTEGER NOT NULL,
   PRIMARY KEY (group_id, hour)
+);
+CREATE TABLE IF NOT EXISTS stickers (
+  id INTEGER PRIMARY KEY,
+  sha256 TEXT UNIQUE NOT NULL,
+  file TEXT NOT NULL,                       -- bare file name inside the stickers directory
+  description TEXT NOT NULL,
+  saved_at REAL NOT NULL,
+  used_count INTEGER NOT NULL DEFAULT 0,
+  last_used REAL
 );
 CREATE INDEX IF NOT EXISTS memories_user ON memories (user_id);
 CREATE INDEX IF NOT EXISTS emotions_created ON emotions (created_at);
@@ -441,3 +450,31 @@ class Store:
                 " ON CONFLICT(group_id,hour) DO UPDATE SET count=count+1",
                 (group_id, day, hour),
             )
+
+    # stickers
+    def sticker(self, sticker_id: int) -> sqlite3.Row | None:
+        return self._one("SELECT * FROM stickers WHERE id=?", (sticker_id,))
+
+    def sticker_known(self, sha256: str) -> bool:
+        return self._one("SELECT 1 FROM stickers WHERE sha256=?", (sha256,)) is not None
+
+    def all_stickers(self) -> list[sqlite3.Row]:
+        return self._all("SELECT * FROM stickers ORDER BY id")
+
+    def add_sticker(self, sha256: str, file: str, description: str, now: float) -> None:
+        self._run(
+            "INSERT INTO stickers (sha256,file,description,saved_at) VALUES (?,?,?,?)",
+            (sha256, file, description, now),
+        )
+
+    def least_used_sticker(self) -> sqlite3.Row | None:
+        return self._one("SELECT * FROM stickers ORDER BY used_count, saved_at LIMIT 1")
+
+    def use_sticker(self, sticker_id: int, now: float) -> None:
+        self._run(
+            "UPDATE stickers SET used_count=used_count+1, last_used=? WHERE id=?",
+            (now, sticker_id),
+        )
+
+    def delete_sticker(self, sticker_id: int) -> None:
+        self._run("DELETE FROM stickers WHERE id=?", (sticker_id,))

@@ -23,7 +23,6 @@ MIN_BREADTH = 0.05  # floor of energy / 100 so a tired moment never zeroes the o
 MENTION_WEIGHT = 2.0
 REPLY_WEIGHT = 2.2
 QUESTION_WEIGHT = 0.8
-SCOPE_QUESTION_BONUS = 0.8
 AFFINITY_WEIGHT = 1.0
 AFFINITY_RANGE = (-0.6, 1.0)
 AROUSAL_WEIGHT = 0.8
@@ -89,19 +88,17 @@ def chat_logit(
     mention: bool,
     reply: bool,
     question: bool,
-    scoped: bool,
     affinity: float,
     arousal: float,
     energy: float,
     count: int,
 ) -> float:
     """The log-odds of speaking up on a batch of `count` new messages; `affinity` is 0-100."""
-    question_weight = QUESTION_WEIGHT + (SCOPE_QUESTION_BONUS if scoped else 0.0)
     return (
         state.bias
         + MENTION_WEIGHT * mention
         + REPLY_WEIGHT * reply
-        + question_weight * question
+        + QUESTION_WEIGHT * question
         + AFFINITY_WEIGHT * min(AFFINITY_RANGE[1], max(AFFINITY_RANGE[0], affinity / 100.0))
         + AROUSAL_WEIGHT * arousal
         + math.log(breadth(energy))

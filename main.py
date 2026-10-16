@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import datetime
 import json
@@ -9,6 +10,7 @@ import os
 import random
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,19 +34,13 @@ from .jobs import Upkeep
 from .marker import Marker, marker_rules, parse_marker, strip_marker
 from .mind import Mind
 from .proactive_chat import (
-    ANSWERED_CHECK_PROMPT,
-    ASK,
-    ASK_WAIT_ALONE_SECONDS,
-    ASK_WAIT_SECONDS,
+    CHATTER_PROMPT,
     JUDGE_TIMEOUT_SECONDS,
     QUIET_SECONDS,
     SELF_SPEAKER,
     STALE_REPLY_MESSAGES,
     STALE_REPLY_SECONDS,
-    VERDICT_TIMEOUT_SECONDS,
     ProactiveChat,
-    chatter_prompt,
-    parse_judgement,
     parse_reply,
 )
 from .reply_switch import canonical_reply_switch_command, is_group_manager
@@ -55,6 +51,7 @@ from .safety import (
     sanitize_context_history,
 )
 from .settings import Settings
+from .stickers import Stickers
 from .store import Store
 from .talk import (
     HOURLY_CALL_FUSE,
@@ -84,12 +81,14 @@ _group_ids: frozenset[str] = frozenset()
 _SLOT_HELD_KEY = "_innerlife_llm_slot_held"
 _SLOT_WATCHDOG_KEY = "_innerlife_llm_slot_watchdog"
 _REQUEST_TEXT_KEY = "_innerlife_request_text"
-_PROACTIVE_ANSWER_KEY = "_innerlife_proactive_answer"
+ANSWER_KEY = "innerlife_answer"  # public: a feature plugin sets it, see docs/design.md
 _CHAT_ENTRY_KEY = "_innerlife_chat_entry"
 _SPEAKERS_KEY = "_innerlife_speakers"
 _BURST_CAP_KEY = "_innerlife_burst_cap"
 _BURST_REST_KEY = "_innerlife_burst_rest"
 _DRAW_KEY = "_innerlife_draw"
+_STICKER_KEY = "_innerlife_sticker"
+_IMAGES_KEY = "_innerlife_images"
 
 # What AstrBot itself adds to a request; every other extra content part is dropped.
 KNOWLEDGE_BASE_PREFIX = "[Related Knowledge Base Results]:"
@@ -253,7 +252,7 @@ class Main(star.Star):
         self.search_prompt = SEARCH_RULES.format(link_rule=link_rule)
         self.persona_system_prompt = "\n\n".join((self.safety_prompt, s.persona_prompt))
         self.proactive_system_prompt = "\n\n".join(
-            (self.safety_prompt, s.persona_prompt, chatter_prompt(s.support_scope))
+            (self.safety_prompt, s.persona_prompt, CHATTER_PROMPT)
         )
 
         self._llm_slots = asyncio.BoundedSemaphore(s.max_concurrency)
@@ -267,6 +266,7 @@ class Main(star.Star):
         self.store: Store | None = None
         self.mind: Mind | None = None
         self.gate: ToolGate | None = None
+        self.stickers: Stickers | None = None
         self.upkeep: Upkeep | None = None
         self._http: httpx.AsyncClient | None = None
         self._umo: dict[str, str] = {}
@@ -291,6 +291,10 @@ class Main(star.Star):
                 self.store,
                 data_dir / "images",
                 s.tz,
+            )
+        if s.stickers:
+            self.stickers = Stickers(
+                self.store, data_dir / "stickers", s.sticker_max_count, s.sticker_max_bytes
             )
         self._http = httpx.AsyncClient(timeout=20, follow_redirects=True)
         self.upkeep = Upkeep(
@@ -390,7 +394,7 @@ class Main(star.Star):
         parts.append(self.mind.diary_text(dt.date()))
         return "\n\n".join(part for part in parts if part)
 
-    def _rules(self, cap: int, *, news: bool = False) -> str:
+    def _rules(self, cap: int, *, news: bool = False, images: int = 0, stickers: bool = False) -> str:
         s = self.s
         return "\n\n".join(
             part
@@ -400,6 +404,8 @@ class Main(star.Star):
                     memory=s.memory,
                     draw=s.draw and self.gate is not None,
                     news=news,
+                    keep=images > 0 and self.stickers is not None,
+                    stickers=self.stickers.listing() if stickers and self.stickers is not None else "",
                 ),
                 burst_rules(cap) if s.burst else "",
                 self.search_prompt if s.search_rules else "",
@@ -439,6 +445,10 @@ class Main(star.Star):
         """A function plugin sent this to the group on its own (e.g. a notice)."""
         self._bot_notes[group_id] = time.monotonic()
         self._note_reply(group_id, redact_sensitive_text(text, self.secrets), spend=False)
+
+    def her_lines(self, group_id: str, since: float) -> list[tuple[float, str]]:
+        """Her own sent lines in a group since `since` (monotonic time), see docs/design.md."""
+        return self._proactive_chat.her_lines(group_id, since)
 
     def _apply_marker(
         self,
@@ -513,6 +523,42 @@ class Main(star.Star):
                 os.remove(path)
             except OSError:
                 pass
+
+    def _wanted_sticker(self, marker: Marker) -> int | None:
+        """The sticker id she asked to send, when she has that one."""
+        if self.stickers is None or marker.sticker is None or self.store.sticker(marker.sticker) is None:
+            return None
+        return marker.sticker
+
+    async def _send_sticker(self, send, group_id: str, sticker_id: int) -> None:
+        taken = self.stickers.take(sticker_id)
+        if taken is None:
+            return
+        path, description = taken
+        await send(MessageChain(chain=[Image.fromFileSystem(str(path))]))
+        self.store.use_sticker(sticker_id, time.time())
+        self._note_reply(group_id, f"[表情包：{description}]", spend=False)
+
+    def _keep_stickers(self, marker: Marker, image_refs: list[str]) -> None:
+        """Keep the images she marked from the ones she was shown, numbered from 1."""
+        if self.stickers is None:
+            return
+        for note in marker.keep:
+            if note.image > len(image_refs):
+                continue
+            data = self._image_bytes(image_refs[note.image - 1])
+            if data is not None and self.stickers.save(data, note.description, time.time()):
+                logger.info("Sticker kept: %s", note.description)
+
+    def _image_bytes(self, image_ref: str) -> bytes | None:
+        size = self._image_size(image_ref)
+        if size is None or size > self.s.sticker_max_bytes:
+            return None
+        if image_ref.startswith("base64://"):
+            return base64.b64decode(image_ref.removeprefix("base64://"))
+        if image_ref.startswith("data:"):
+            return base64.b64decode(image_ref.split(";base64,", 1)[1])
+        return Path(image_ref).read_bytes()
 
     async def note_signal(self, event: AstrMessageEvent, signal: dict) -> None:
         """A function plugin reports something that happened to her (see docs/design.md)."""
@@ -823,7 +869,7 @@ class Main(star.Star):
             text,
             time.monotonic(),
             sender_id=sender_id,
-            awaits_verdict=enabled and not mentioned and self.s.daily_call_fuse > 0,
+            pending=enabled and not mentioned and self.s.daily_call_fuse > 0,
             images=[c for c in event.get_messages() if isinstance(c, Image)]
             if self.s.vision
             else None,
@@ -835,7 +881,7 @@ class Main(star.Star):
             self._save_talk(group_id, state)
         # Her answer to this message can tell from it whether anyone spoke afterwards.
         event.set_extra(_CHAT_ENTRY_KEY, entry)
-        if entry.verdict is None:
+        if not entry.pending:
             return
         # Each new message gets judged once the group pauses, or every few
         # messages in a fast burst.
@@ -845,30 +891,6 @@ class Main(star.Star):
             group_id, entry
         ):
             await self._judge_chatter(event, group_id)
-        try:
-            verdict = await asyncio.wait_for(entry.verdict, VERDICT_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            return
-        if verdict != ASK:
-            return
-        # Give group members time to answer before the bot steps in: longer
-        # when others are around, shorter when only the asker is talking.
-        await asyncio.sleep(
-            ASK_WAIT_SECONDS
-            if self._proactive_chat.others_active(group_id, entry)
-            else ASK_WAIT_ALONE_SECONDS
-        )
-        if (
-            not self._group_enabled(group_id)
-            or self._fuse_reached(group_id)
-            or not await self._question_still_open(group_id, entry)
-            or self._fuse_reached(group_id)
-        ):
-            return
-        self._count_call(group_id)
-        logger.info("Proactive chat: answering an unmentioned question")
-        event.set_extra(_PROACTIVE_ANSWER_KEY, True)
-        event.is_at_or_wake_command = True
 
     async def _judge_images(self, entries) -> tuple[list[str], list[str]]:
         """Local paths of the newest images among the judged lines within the size limits, and
@@ -905,18 +927,13 @@ class Main(star.Star):
             "mention": any(name in e.text.casefold() for e in fresh for name in names),
             "reply": any(e.reply_to_her for e in fresh),
             "question": any(is_question(e.text) for e in fresh),
-            "scoped": bool(s.support_scope),
             "affinity": max((self.mind.affinity(e.sender_id, now) for e in fresh), default=0.0),
             "arousal": self.mind.mood(now)[1],
             "energy": chat.energy,
             "count": len(fresh),
         }
         z = chat_logit(state, **features)
-        # With a support scope an open question always reaches the judge, whatever her mood.
-        forced = {"forced": "question"} if features["scoped"] and features["question"] else {}
-        p = 1.0 if forced else probability(z, s.talk_temperature)
-        return p, {
-            **forced,
+        return probability(z, s.talk_temperature), {
             **features,
             "z": z,
             "bias": state.bias,
@@ -937,7 +954,6 @@ class Main(star.Star):
             entries = chat.begin_judgement(group_id, time.monotonic())
             if entries is None:
                 return
-            targets = []
             downloaded: list[str] = []
             try:
                 if fused:
@@ -946,7 +962,7 @@ class Main(star.Star):
                 mono = time.monotonic()
                 mood = chat.mood(mono)
                 p, features = self._chat_gate(group_id, entries)
-                if "forced" not in features and self._roll() >= p:
+                if self._roll() >= p:
                     logger.info("Proactive chat: stayed quiet (p=%.2f)", p)
                     self._log_talk(group_id, "chat", "skip", p, features)
                     return
@@ -956,21 +972,21 @@ class Main(star.Star):
                     else ""
                 )
                 speakers = chat.recent_speakers(group_id, mono)
-                rules = self._rules(self._burst_cap())
+                images, downloaded = (
+                    await self._judge_images(entries) if self.s.vision else ([], [])
+                )
+                rules = self._rules(self._burst_cap(), images=len(images), stickers=True)
                 system = "\n\n".join(
                     part
                     for part in (
                         self.proactive_system_prompt,
                         self._state_prompt(speakers),
                         rules,
-                        "无论你输出 PASS、ASK 还是要说的话，都可以在最后另起一行附内部标记。"
+                        "无论你输出 PASS 还是要说的话，都可以在最后另起一行附内部标记。"
                         if "<il>" in rules
                         else "",
                     )
                     if part
-                )
-                images, downloaded = (
-                    await self._judge_images(entries) if self.s.vision else ([], [])
                 )
                 self._count_call(group_id)
                 answer = await self._model_call(
@@ -987,10 +1003,9 @@ class Main(star.Star):
                 )
                 text, marker = parse_marker(answer or "")
                 self._apply_marker(marker, group_id, speakers)
+                self._keep_stickers(marker, images)
                 parts = split_parts(text)
-                targets, line = parse_judgement(
-                    parts[0] if parts else "", entries, allow_ask=bool(self.s.support_scope)
-                )
+                line = parse_reply(parts[0]) if parts else None
                 messages = (
                     self._burst_messages(
                         [line, *(r for part in parts[1:] if (r := parse_reply(part)))]
@@ -999,12 +1014,12 @@ class Main(star.Star):
                     else []
                 )
                 reply = messages[0] if messages else None
-                outcome = (
-                    "fail" if answer is None else "ASK" if targets else "CHAT" if reply else "PASS"
-                )
+                # Only a sticker: an empty line, not a PASS.
+                sticker = self._wanted_sticker(marker) if reply or not text else None
+                outcome = "fail" if answer is None else "CHAT" if reply or sticker else "PASS"
                 self._log_talk(group_id, "chat", outcome, p, features)
                 logger.info("Proactive chat judged: %s (%s)", outcome, mood.split("：")[0])
-                if not reply:
+                if not reply and sticker is None:
                     return
                 # Drop a line the chat has already moved past; @ the member she
                 # answers when others spoke after it.
@@ -1017,32 +1032,27 @@ class Main(star.Star):
                 ):
                     logger.info("Proactive chat: dropped a stale reply")
                     return
-                chain = MessageChain()
-                if later:
-                    chain.at(target.speaker, target.sender_id).message(" ")
-                chain.message(reply)
-                try:
-                    await event.send(chain)
-                except Exception:
-                    logger.warning("Proactive chat send failed", exc_info=True)
-                    return
-                self._unprompted[group_id] = self._note_reply(group_id, reply)
-                followups.append(self._send_rest(event.send, group_id, messages[1:]))
+                if reply:
+                    chain = MessageChain()
+                    if later:
+                        chain.at(target.speaker, target.sender_id).message(" ")
+                    chain.message(reply)
+                    try:
+                        await event.send(chain)
+                    except Exception:
+                        logger.warning("Proactive chat send failed", exc_info=True)
+                        return
+                    self._unprompted[group_id] = self._note_reply(group_id, reply)
+                    followups.append(self._send_rest(event.send, group_id, messages[1:]))
+                if sticker is not None:
+                    followups.append(self._send_sticker(event.send, group_id, sticker))
                 if marker.draw and self.s.draw:
                     followups.append(self._draw_and_send(event, marker.draw, event.send))
             finally:
                 self._delete_files(downloaded)
-                chat.finish_judgement(entries, targets)
+                chat.finish_judgement(entries)
         for followup in followups:
             await followup
-
-    async def _question_still_open(self, group_id: str, entry) -> bool:
-        thread = self._proactive_chat.thread_from(group_id, entry)
-        if thread is None:
-            return False
-        self._count_call(group_id)
-        answer = await self._model_call(ANSWERED_CHECK_PROMPT, thread)
-        return (answer or "").strip().upper().startswith("OPEN")
 
     async def _expire_context_if_needed(self, event: AstrMessageEvent) -> None:
         ttl = self.s.history_ttl_seconds
@@ -1099,11 +1109,15 @@ class Main(star.Star):
         if not self._group_enabled(str(event.get_group_id())):
             event.stop_event()
             return
-        # AstrBot also wakes on a quoted bot message; only an explicit @ or an
-        # open question picked up by the chatter judge may reach the model.
-        if not (_event_mentions_bot(event) or event.get_extra(_PROACTIVE_ANSWER_KEY)):
-            event.stop_event()
-            return
+        # AstrBot also wakes on a quoted bot message; only an explicit @ or a feature
+        # plugin's `innerlife_answer` (docs/design.md) may reach the model, and the
+        # latter counts as a model call of the group's fuse.
+        if not _event_mentions_bot(event):
+            group_id = str(event.get_group_id())
+            if not event.get_extra(ANSWER_KEY) or self._fuse_reached(group_id):
+                event.stop_event()
+                return
+            self._count_call(group_id)
 
         event.message_str = redact_sensitive_text(
             event.get_message_str(), self.secrets
@@ -1240,17 +1254,17 @@ class Main(star.Star):
                 part.text = redact_sensitive_text(text, self.secrets)
         request.func_tool = ToolSet()
         speakers = self._speakers(event)
-        support = bool(event.get_extra(_PROACTIVE_ANSWER_KEY)) or any(
+        support = bool(event.get_extra(ANSWER_KEY)) or any(
             str(getattr(part, "text", "")).startswith(KNOWLEDGE_BASE_PREFIX)
             for part in request.extra_user_content_parts
         )
         cap = 0 if support or not self.s.burst else self._burst_cap()
         event.set_extra(_SPEAKERS_KEY, speakers)
+        event.set_extra(_IMAGES_KEY, list(request.image_urls))
         event.set_extra(_BURST_CAP_KEY, cap)
+        rules = self._rules(cap, images=len(request.image_urls), stickers=True)
         addition = "\n\n".join(
-            part
-            for part in (self._state_prompt(speakers), self._rules(cap))
-            if part
+            part for part in (self._state_prompt(speakers), rules) if part
         )
         if addition:
             request.system_prompt += "\n\n" + addition
@@ -1287,8 +1301,16 @@ class Main(star.Star):
                 return
             visible, marker = parse_marker(response.completion_text or "")
             reply = finalize_reply(visible, self.secrets, self.s.allowed_link_domains)
-            response.completion_text = reply or self.s.model_error_message
+            sticker = self._wanted_sticker(marker)
+            if sticker is not None and not visible:
+                # Only a sticker: nothing to say, and AstrBot sends nothing for an empty reply.
+                response.completion_text = ""
+                await self._send_sticker(event.send, str(event.get_group_id()), sticker)
+            else:
+                response.completion_text = reply or self.s.model_error_message
+                event.set_extra(_STICKER_KEY, sticker)
             self._apply_answer_marker(event, marker)
+            self._keep_stickers(marker, event.get_extra(_IMAGES_KEY) or [])
         finally:
             self._release_slot(event)
 
@@ -1336,9 +1358,13 @@ class Main(star.Star):
         self._release_slot(event)
         group_id = str(event.get_group_id() or "")
         rest = event.get_extra(_BURST_REST_KEY) or []
+        sticker = event.get_extra(_STICKER_KEY)
         draw = event.get_extra(_DRAW_KEY)
         event.set_extra(_BURST_REST_KEY, [])
+        event.set_extra(_STICKER_KEY, None)
         event.set_extra(_DRAW_KEY, "")
         await self._send_rest(event.send, group_id, rest)
+        if sticker is not None:
+            await self._send_sticker(event.send, group_id, sticker)
         if draw:
             await self._draw_and_send(event, draw, event.send)
