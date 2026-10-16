@@ -7,7 +7,7 @@
 ## 功能
 
 - **说话量**：没被 @ 时她不靠每日次数硬限，而是由状态算一个开口概率（被叫到名字、被回复、有人提问、好感、心情、兴致、热度都会抬高它），代码先掷骰子，命中才付费调用判断模型，模型仍可 PASS。她的发言占比会慢慢向 `talk.share` 逼近；想开新话题的冲动在群冷着时一路攒，开过话题后回落。只保留成本熔断（`basic.daily_call_fuse`，默认每群每天 300 次后台聊天调用，另有每小时 30 次；0 表示只回复 @）。公式和每个旋钮的含义见 [`docs/design.md`](docs/design.md)。
-- **插话判断**：没被 @ 时，每批群消息先过上面的开口概率，命中后看一眼，按当前心情和兴致决定不说话还是闲聊一句。需要"没人 @ 也要认真回答"的业务（比如答疑）由功能插件决定，再通过事件 extra `innerlife_answer` 交给她的 @ 回答路径，框架不含这类判断。
+- **插话判断**：没被 @ 时，每批群消息先过上面的开口概率，命中后看一眼，按当前心情和兴致决定不说话还是闲聊一句。有人问到她工作范围内的事（有功能插件给出了相关的工作资料，见下）时不掷骰，直接看一眼：没人答好她就用自己的话答，已经解决了就 PASS。
 - **情绪四层**：具体情绪（会衰减）→ 背景心情 → 兴致（全群共用一个）→ 对每个人的好感；性格参数可调，默认是易炸毛、不记仇、一示好就软。
 - **记忆**：从对话里记下群友的小事，再次提起会加深，久了会忘；私密的事不进提示词。每天深夜整理一次。
 - **日记**：每天 8 节固定模板，外加周记、月记；最近几天的日记会影响她今天的状态。
@@ -58,6 +58,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 | 键 | 说明 |
 |---|---|
 | `basic.persona_prompt` | 她的人设和说话方式 |
+| `basic.work_background` | 她的工作：身份和边界，留空表示没有；填了之后系统提示词里紧跟人设有一节「你的工作」 |
 | `basic.bot_names` | 群友对她的称呼，用来判断是不是在叫她 |
 | `basic.group_ids` | 生效的群号；空表示所有群 |
 | `basic.allowed_link_domains` | 回复里允许出现的 HTTPS 域名；空表示不发任何链接 |
@@ -104,7 +105,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 
 ## 写功能插件
 
-功能插件不 import innerlife，只按钩子优先级配合：只追加 `system_prompt`、不往请求里加工具、固定命令处理完 `stop_event()`，追加的提示词用"【标题】"自成一节、不续框架的编号。完整约定、公开接口（`note_signal`、`note_bot_message`、`bot_names`，以及让没被 @ 的消息走 @ 回答路径的事件 extra `innerlife_answer`）、内部标记协议和各模块的设计见 [`docs/design.md`](docs/design.md)。
+功能插件不 import innerlife，也不替她说话：它们只提供工作资料，由她自己用自己的口气答。想提供资料，在插件的星实例上实现 `async def innerlife_reference(self, text, group_id) -> str`，返回资料和使用规范，和这条消息无关就返回空串；框架把所有来源的文字放进同一个提示词的一节「工作资料（由插件提供，含使用规范）」。另有 `note_signal`、`note_bot_message`、`bot_names` 三个公开接口。固定命令处理完 `stop_event()`。完整约定、内部标记协议和各模块的设计见 [`docs/design.md`](docs/design.md)。
 
 ## 测试
 

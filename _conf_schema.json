@@ -26,6 +26,13 @@
         "obvious_hint": true,
         "hint": "安全底线由程序固定在它前面，人设改不掉。"
       },
+      "work_background": {
+        "description": "她的工作",
+        "type": "text",
+        "default": "",
+        "obvious_hint": true,
+        "hint": "她在群里的工作身份和边界，留空表示没有。填了之后系统提示词里会紧跟人设加一节「你的工作」。"
+      },
       "bot_names": {
         "description": "群友对她的称呼",
         "type": "list",

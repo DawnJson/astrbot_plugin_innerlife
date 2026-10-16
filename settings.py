@@ -31,6 +31,7 @@ class Settings:
     group_ids: frozenset[str]
     astrbot_persona_id: str
     persona_prompt: str
+    work_background: str
     bot_names: list[str]
     allowed_link_domains: tuple[str, ...]
     secret_env_vars: list[str]
@@ -133,6 +134,7 @@ class Settings:
             group_ids=group_ids,
             astrbot_persona_id=persona_id,
             persona_prompt=str(basic["persona_prompt"]).strip(),
+            work_background=str(basic["work_background"]).strip(),
             bot_names=_list(basic["bot_names"]),
             allowed_link_domains=tuple(
                 domain.casefold().strip(".") for domain in _list(basic["allowed_link_domains"])

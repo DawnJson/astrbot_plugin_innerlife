@@ -26,6 +26,7 @@ from astrbot.core.message.message_event_result import (
     ResultContentType,
 )
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
+from astrbot.core.star.star import StarMetadata
 
 import astrbot_plugin_innerlife.main as main_module
 from astrbot_plugin_innerlife import diary, memory
@@ -170,7 +171,30 @@ def make_main(**overrides) -> Main:
             **overrides,
         }
     )
-    return Main(SimpleNamespace(), config)
+    return Main(make_context(), config)
+
+
+def make_context(*sources, **attrs) -> SimpleNamespace:
+    """A context whose star registry holds one activated plugin per `sources` instance."""
+    return SimpleNamespace(
+        get_all_stars=lambda: [StarMetadata(activated=True, star_cls=s) for s in sources],
+        **attrs,
+    )
+
+
+class FakeSource:
+    """A plugin instance with the public `innerlife_reference` method."""
+
+    def __init__(self, block: str = "资料块", *, delay: float = 0.0, fail: bool = False) -> None:
+        self.block, self.delay, self.fail = block, delay, fail
+        self.calls: list[tuple[str, str]] = []
+
+    async def innerlife_reference(self, text: str, group_id: str) -> str:
+        self.calls.append((text, group_id))
+        await asyncio.sleep(self.delay)
+        if self.fail:
+            raise RuntimeError("source broke")
+        return self.block
 
 
 def model_result(text: str) -> MessageEventResult:
@@ -412,7 +436,7 @@ async def test_waiting_guard() -> None:
 
     instance._expire_context_if_needed = no_expiry
 
-    # Only an explicit @ (or a feature plugin's `innerlife_answer`) may reach the model.
+    # Only an explicit @ may reach the model.
     quoted_bot = main_module.Reply(id="1", sender_id=BOT_ID, chain=[])
     quote_only = FakeEvent("接口返回 429 怎么办", messages=[quoted_bot])
     await instance.guard_waiting_request(quote_only)
@@ -739,60 +763,75 @@ async def test_chatter_judgement() -> None:
         print("PASS policy: chatter judgement sends a line or stays quiet")
 
 
-async def test_feature_plugin_answer_goes_through_the_at_path() -> None:
-    """A feature plugin wakes an unmentioned message with the public `innerlife_answer` extra."""
-    assert main_module.ANSWER_KEY == "innerlife_answer"
+async def test_work_material_in_the_at_path() -> None:
+    """Every plugin with `innerlife_reference` adds one section to her prompt; she is always the voice."""
     with tempfile.TemporaryDirectory() as directory:
 
         async def no_expiry(_event) -> None:
             return None
 
         def asking(**kwargs) -> FakeEvent:
-            event = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")], **kwargs)
-            event.set_extra(main_module.ANSWER_KEY, True)
-            return event
+            return FakeEvent("这个怎么配置", **kwargs)
 
-        instance = stateful(directory + "/main", roll=1.0, cooldown_seconds=0)
+        instance = stateful(
+            directory + "/main", roll=1.0, cooldown_seconds=0, work_background="你在这里做客服"
+        )
         instance._expire_context_if_needed = no_expiry
 
-        # No model call is made by the chatter handler itself; the extra alone opens the @ path
-        # and counts as one call of the group's fuse.
-        woken = asking()
-        await instance.guard_waiting_request(woken)
-        assert not woken.stopped and woken.sent == []
-        assert instance.store.calls(GROUP_ID, *instance._call_buckets())[0] == 1
-
-        # Without the extra an unmentioned message never reaches the model, and @ costs no call.
+        # An unmentioned message never reaches the model, whatever plugins may think.
         plain = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
         await instance.guard_waiting_request(plain)
         assert plain.stopped
-        mentioned = FakeEvent("在吗")
-        await instance.guard_waiting_request(mentioned)
-        assert not mentioned.stopped
-        assert instance.store.calls(GROUP_ID, *instance._call_buckets())[0] == 1
+        woken = asking()
+        await instance.guard_waiting_request(woken)
+        assert not woken.stopped
+        assert instance.store.calls(GROUP_ID, *instance._call_buckets())[0] == 0
 
-        # Answered like any @: persona, state and rules are added, and the reply is one message.
+        # Sources are asked with the message text; their blocks form one section after persona and work.
+        first, second = FakeSource("第一块资料"), FakeSource("第二块资料")
+        empty, broken, slow = FakeSource(""), FakeSource(fail=True), FakeSource(delay=5.0)
+        stars = [
+            *(StarMetadata(activated=True, star_cls=s) for s in (first, empty, broken, slow, second)),
+            StarMetadata(activated=True, star_cls=None),
+            StarMetadata(activated=False, star_cls=FakeSource("停用的资料")),
+            StarMetadata(activated=True, star_cls=SimpleNamespace(innerlife_reference="not callable")),
+        ]
+        instance.context = SimpleNamespace(get_all_stars=lambda: stars)
         request = ProviderRequest(prompt="这个怎么配置")
         await instance.secure_model_request(woken, request)
-        await instance.apply_persona(woken, request)
-        assert "测试人设" in request.system_prompt
+        with mock.patch.object(main_module, "REFERENCE_TIMEOUT_SECONDS", 0.05):
+            await instance.apply_persona(woken, request)
+        prompt = request.system_prompt
+        assert first.calls == [("这个怎么配置", GROUP_ID)] == second.calls and len(slow.calls) == 1
+        assert prompt.count("【工作资料（由插件提供，含使用规范）】") == 1
+        assert "第一块资料\n\n第二块资料" in prompt and "停用的资料" not in prompt
+        order = [prompt.index(part) for part in ("测试人设", "【你的工作】\n你在这里做客服", "【工作资料", "第一块资料")]
+        assert order == sorted(order), order
         assert woken.get_extra(main_module._BURST_CAP_KEY) == 0
         assert woken.get_extra(main_module._SLOT_HELD_KEY) is True
         instance._release_slot(woken)
 
-        # A closed reply switch and a spent fuse both stop it.
+        # Nothing relevant: no material section at all, and she still has her job.
+        instance.context = make_context(FakeSource(""))
+        bare = ProviderRequest(prompt="在吗")
+        await instance.secure_model_request(woken, bare)
+        await instance.apply_persona(woken, bare)
+        assert "【工作资料" not in bare.system_prompt and "你在这里做客服" in bare.system_prompt
+        instance._release_slot(woken)
+
+        # No work_background: no job section.
+        jobless = stateful(directory + "/jobless", roll=1.0)
+        jobless.context = make_context(FakeSource("资料"))
+        request = ProviderRequest(prompt="x")
+        await jobless.apply_persona(woken, request)
+        assert "【你的工作】" not in request.system_prompt and "资料" in request.system_prompt
+        jobless._release_slot(woken)
+
+        # A closed reply switch still stops it.
         instance.store.set_group_enabled(GROUP_ID, False)
         off = asking()
         await instance.guard_waiting_request(off)
         assert off.stopped
-
-        tight = stateful(directory + "/tight", roll=1.0, cooldown_seconds=0, daily_call_fuse=1)
-        tight._expire_context_if_needed = no_expiry
-        tight._count_call(GROUP_ID)
-        spent = asking()
-        await tight.guard_waiting_request(spent)
-        assert spent.stopped
-        assert tight.store.calls(GROUP_ID, *tight._call_buckets())[0] == 1
 
         # daily_call_fuse 0 means no unmentioned chat is judged at all.
         mute = stateful(directory + "/mute", roll=0.0, daily_call_fuse=0)
@@ -804,7 +843,7 @@ async def test_feature_plugin_answer_goes_through_the_at_path() -> None:
         silent = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
         await asyncio.wait_for(mute.handle_group_chatter(silent), 1)
         assert mute.store.talk_log() == []
-        print("PASS policy: innerlife_answer opens the @ path, counts one call, and respects the switch and the fuse")
+        print("PASS policy: work material from every source forms one section after persona and job; @ stays the only way in")
 
 
 class FakeGate:
@@ -1323,11 +1362,6 @@ async def test_insult_signal_and_bot_notes() -> None:
         before = time.monotonic()
         instance._note_reply(GROUP_ID, "连发第二条", spend=False)
         instance._proactive_chat.record(GROUP_ID, "甲", "群友说话", time.monotonic(), sender_id="1", pending=False)
-        mine = instance.her_lines(GROUP_ID, before)
-        assert [text for _, text in mine] == ["连发第二条"] and mine[0][0] >= before
-        assert last.text in [text for _, text in instance.her_lines(GROUP_ID, 0.0)]
-        assert instance.her_lines("no-such-group", 0.0) == []
-        assert list(inspect.signature(Main.her_lines).parameters) == ["self", "group_id", "since"]
         assert GROUP_ID in instance._bot_notes
 
         calm = stateful(directory + "/calm", emotion__enabled=False)
@@ -1629,7 +1663,7 @@ async def test_talk_gate() -> None:
             chat.record(
                 group, "甲", text, time.monotonic(), sender_id="1", pending=True, **kwargs
             )
-            return gate._chat_gate(group, chat.begin_judgement(group, time.monotonic()))
+            return gate._chat_gate(group, chat.begin_judgement(group, time.monotonic()), False)
 
         plain, plain_features = chance("g1", "今天好热")
         named, named_features = chance("g2", "hey TESTER 今天好热")
@@ -1692,6 +1726,66 @@ async def test_talk_gate() -> None:
         assert logged["outcome"] == "skip" and logged["p"] < 1.0
         assert json.loads(logged["features"])["question"] is True
 
+        # A question that plugins have material for is work: no roll, the judge gets the material.
+        systems: list[str] = []
+
+        def worker(name: str, source: FakeSource, **overrides) -> tuple[Main, list[str]]:
+            instance, prompts = fresh(name, roll=1.0, **overrides)
+            instance.context = make_context(source)
+
+            async def call(system_prompt: str, prompt: str, **_):
+                systems.append(system_prompt)
+                prompts.append(prompt)
+                return "PASS"
+
+            instance._model_call = call
+            return instance, prompts
+
+        source = FakeSource("门店资料：周一休息")
+        work, prompts = worker("work", source, work_background="你在这里做客服")
+        chat = work._proactive_chat
+        chat.record(GROUP_ID, "甲", "今天好热", time.monotonic(), sender_id="1", pending=True)
+        entry = chat.record(GROUP_ID, "乙", "什么时候营业？", time.monotonic(), sender_id="2", pending=True)
+        await work._judge_chatter(event, GROUP_ID)
+        assert source.calls == [("什么时候营业？", GROUP_ID)] and not entry.pending
+        [system] = systems
+        assert "【工作资料（由插件提供，含使用规范）】\n门店资料：周一休息" in system
+        assert main_module.WORK_QUESTION_PROMPT in system and "【你的工作】" in system
+        assert system.index("测试人设") < system.index("【你的工作】") < system.index("【工作资料")
+        assert len(prompts) == 1
+        [logged] = work.store.talk_log()
+        features = json.loads(logged["features"])
+        assert logged["outcome"] == "PASS" and logged["p"] == 1.0 and features["work"] is True
+
+        # No question, no consultation; a question with nothing for it rolls like any other.
+        systems.clear()
+        idle_source = FakeSource("资料")
+        idle, prompts = worker("idle", idle_source)
+        idle._proactive_chat.record(GROUP_ID, "甲", "今天好热", time.monotonic(), sender_id="1", pending=True)
+        await idle._judge_chatter(event, GROUP_ID)
+        assert idle_source.calls == [] and prompts == []
+        nothing_source = FakeSource("")
+        nothing, prompts = worker("nothing", nothing_source)
+        nothing._proactive_chat.record(GROUP_ID, "甲", "吃了吗？", time.monotonic(), sender_id="1", pending=True)
+        await nothing._judge_chatter(event, GROUP_ID)
+        assert len(nothing_source.calls) == 1 and prompts == [] and systems == []
+        [skipped] = nothing.store.talk_log()
+        assert skipped["outcome"] == "skip" and json.loads(skipped["features"])["work"] is False
+
+        # The fuse and a busy slot still hold her back, before any consultation.
+        spent_source = FakeSource("资料")
+        spent, prompts = worker("spent", spent_source, daily_call_fuse=1)
+        spent._count_call(GROUP_ID)
+        spent._proactive_chat.record(GROUP_ID, "甲", "什么时候营业？", time.monotonic(), sender_id="1", pending=True)
+        await spent._judge_chatter(event, GROUP_ID)
+        assert spent_source.calls == [] and prompts == []
+        jammed_source = FakeSource("资料")
+        jammed, prompts = worker("jammed", jammed_source, max_concurrency=1)
+        jammed._proactive_chat.record(GROUP_ID, "甲", "什么时候营业？", time.monotonic(), sender_id="1", pending=True)
+        await jammed._llm_slots.acquire()
+        await jammed._judge_chatter(event, GROUP_ID)
+        assert jammed_source.calls == [] and prompts == []
+
         # Every line she says, and every member message, moves the group's state.
         talker, _ = fresh("talker", roll=1.0)
         with mock.patch.object(main_module, "QUIET_SECONDS", 0):
@@ -1729,7 +1823,7 @@ async def main() -> None:
     await test_response_finalize_and_slot_release()
     await test_decorated_result_at_rule()
     await test_chatter_judgement()
-    await test_feature_plugin_answer_goes_through_the_at_path()
+    await test_work_material_in_the_at_path()
     await test_talk_gate()
     await test_answer_marker_is_stripped_and_applied()
     await test_garbled_markers_never_leak()

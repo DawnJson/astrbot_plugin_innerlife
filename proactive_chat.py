@@ -148,14 +148,6 @@ class ProactiveChat:
         state.messages.append(entry)
         return entry
 
-    def her_lines(self, group_id: str, since: float) -> list[tuple[float, str]]:
-        """(time, text) of her own lines in the buffer from `since` on."""
-        return [
-            (m.at, m.text)
-            for m in self._state(group_id).messages
-            if m.speaker == SELF_SPEAKER and m.at >= since
-        ]
-
     def last_message(self, group_id: str) -> ChatMessage | None:
         messages = self._state(group_id).messages
         return messages[-1] if messages else None
