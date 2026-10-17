@@ -149,7 +149,7 @@ if innerlife is not None and innerlife.star_cls is not None:
 - **兴致** `energy`（0–100，存 `mood.energy`，全群共用）：安静时按 `energy = 100 − (100 − energy)·exp(−Δt / (talk.stamina_minutes·60))` 恢复；她每发一行扣随机 10–35。
 - **每群状态**（`talk` 表：`group_id, bias, her, total, heat, urge, updated_at`，重启接上）：
   - `her` / `total`：她的行数 / 全部行数（群友每条消息 `total+1`；她每发一行 `her+1`、`total+1`），都按半衰期 1 天衰减。`share_now = her / total`；`total < 20` 时数据太少，视为等于目标 `talk.share`。
-  - `bias`：开口倾向的底，初值 −3.0；每个决策点 `bias += 0.05·(share − share_now)`，夹在 [−6, −1]。她说得比目标少，倾向慢慢升；说得比目标多，慢慢降。
+  - `bias`：开口倾向的底，初值 −2.0；每个决策点 `bias += 0.05·(share − share_now)`，夹在 [−6, −1]。她说得比目标少，倾向慢慢升；说得比目标多，慢慢降。
   - `heat`：热度，她发言时 `+= talk.contagion`，按 `exp(−Δt / 240s)` 衰减。
   - `urge`（0–1）：想开新话题的冲动，见下。
 
@@ -173,7 +173,7 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 ### 成本熔断
 
-每个群每天后台聊天类模型调用（判断、主动话题）数到 `basic.daily_call_fuse`（默认 300）就停：不再判断闲聊、不开话题，只回 @。`0` 表示一直如此（收到消息时就不建待判断的结果）。另有常量 `HOURLY_CALL_FUSE = 30`（每群每小时）。计数存在 `model_calls` 表（`group_id, day, hour, count`），重启不清零，按 `basic.timezone` 翻日，翻日时清掉前几天；到限时记一条 warning。它是成本保险，不是控制她说多少话的旋钮。
+每个群每天后台聊天类模型调用（判断、主动话题）数到 `basic.daily_call_fuse`（默认 300）就停：不再判断闲聊、不开话题，只回 @。`0` 表示一直如此（收到消息时就不建待判断的结果）。另有常量 `HOURLY_CALL_FUSE = 50`（每群每小时）。计数存在 `model_calls` 表（`group_id, day, hour, count`），重启不清零，按 `basic.timezone` 翻日，翻日时清掉前几天；到限时记一条 warning。它是成本保险，不是控制她说多少话的旋钮。
 
 ### 决策日志
 

@@ -9,10 +9,10 @@ import math
 import re
 from dataclasses import dataclass
 
-HOURLY_CALL_FUSE = 30  # background chat model calls per group per hour
+HOURLY_CALL_FUSE = 50  # background chat model calls per group per hour
 TALK_LOG_KEEP_DAYS = 14
 
-BIAS_START = -3.0
+BIAS_START = -2.0
 BIAS_RANGE = (-6.0, -1.0)
 BIAS_RATE = 0.05
 COUNT_HALF_LIFE_SECONDS = 86400.0
