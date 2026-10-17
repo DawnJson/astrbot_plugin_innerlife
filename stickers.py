@@ -3,13 +3,47 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import random
 from pathlib import Path
+
+from PIL import Image, ImageSequence
 
 from .store import Store
 
 PROMPT_STICKERS = 40
 PROMPT_MOST_USED = 20  # the rest of the list is random, so what she picks varies
+STICKER_SIDE = 240  # longest side of a kept sticker; QQ shows an image at its own size
+
+
+def shrink(data: bytes) -> bytes:
+    """The image with its longest side cut to STICKER_SIDE, every frame of an animation kept;
+    an image already that small comes back as it is."""
+    with Image.open(io.BytesIO(data)) as image:
+        if max(image.size) <= STICKER_SIDE:
+            return data
+        scale = STICKER_SIDE / max(image.size)
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        frames, durations = [], []
+        for frame in ImageSequence.Iterator(image):
+            frames.append(frame.convert("RGBA").resize(size, Image.LANCZOS))
+            durations.append(frame.info.get("duration", 100))
+        out = io.BytesIO()
+        if image.format == "JPEG":
+            frames[0].convert("RGB").save(out, "JPEG", quality=90)
+        elif len(frames) > 1:
+            frames[0].save(
+                out,
+                image.format,
+                save_all=True,
+                append_images=frames[1:],
+                duration=durations,
+                loop=image.info.get("loop", 0),
+                disposal=2,
+            )
+        else:
+            frames[0].save(out, image.format)
+        return out.getvalue()
 
 
 def image_ext(data: bytes) -> str | None:
@@ -34,18 +68,23 @@ class Stickers:
         directory.mkdir(parents=True, exist_ok=True)
 
     def save(self, data: bytes, description: str, now: float) -> bool:
-        """Keep an image; False when it is not an allowed format, too big, or already kept.
-        Over the count limit the least used, oldest sticker is deleted first."""
+        """Keep an image, shrunk to STICKER_SIDE; False when it is not an allowed format, too
+        big, unreadable, or already kept. Over the count limit the least used, oldest sticker is
+        deleted first. Duplicates are told by the bytes as received."""
         ext = image_ext(data)
         if ext is None or len(data) > self.max_bytes:
             return False
         sha256 = hashlib.sha256(data).hexdigest()
         if self.store.sticker_known(sha256):
             return False
+        try:
+            small = shrink(data)
+        except (OSError, ValueError):
+            return False
         while len(self.store.all_stickers()) >= self.max_count:
             self._delete(self.store.least_used_sticker())
         file = f"{sha256}.{ext}"
-        (self.directory / file).write_bytes(data)
+        (self.directory / file).write_bytes(small)
         self.store.add_sticker(sha256, file, description, now)
         return True
 
@@ -60,7 +99,7 @@ class Stickers:
         chosen = rows[:PROMPT_MOST_USED] + random.sample(
             rest, min(len(rest), PROMPT_STICKERS - PROMPT_MOST_USED)
         )
-        chosen.sort(key=lambda row: row["id"])
+        random.shuffle(chosen)  # an order she reads the same each time pulls her to the same few
         return "\n".join(f"{row['id']}. {row['description']}" for row in chosen)
 
     def take(self, sticker_id: int) -> tuple[Path, str] | None:

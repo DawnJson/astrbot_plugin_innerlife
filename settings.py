@@ -35,6 +35,7 @@ class Settings:
     bot_names: list[str]
     allowed_link_domains: tuple[str, ...]
     secret_env_vars: list[str]
+    error_reply_prefixes: tuple[str, ...]
     switch_command: str
     cooldown_seconds: float
     max_concurrency: int
@@ -140,6 +141,7 @@ class Settings:
                 domain.casefold().strip(".") for domain in _list(basic["allowed_link_domains"])
             ),
             secret_env_vars=_list(basic["secret_env_vars"]),
+            error_reply_prefixes=tuple(_list(basic["error_reply_prefixes"])),
             switch_command=switch_command,
             cooldown_seconds=float(basic["cooldown_seconds"]),
             max_concurrency=int(basic["max_concurrency"]),

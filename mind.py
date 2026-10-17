@@ -238,7 +238,7 @@ class Mind:
 
     def life_text(self, day: datetime.datetime) -> str:
         row = self.store.life(str(day.date()))
-        head = f"现在是{WEEKDAYS[day.weekday()]} {day:%H:%M}。"
+        head = f"现在是{day.year}年{day.month}月{day.day}日 {WEEKDAYS[day.weekday()]} {day:%H:%M}。"
         if row is None:
             return head
         lines = [head]

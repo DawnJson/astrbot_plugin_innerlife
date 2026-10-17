@@ -5,6 +5,7 @@ import base64
 import dataclasses
 import datetime
 import inspect
+import io
 import json
 import math
 import os
@@ -17,6 +18,7 @@ from unittest import mock
 
 import support
 from mcp.types import CallToolResult, ImageContent
+from PIL import Image as PilImage
 
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core.agent.message import TextPart
@@ -621,6 +623,11 @@ async def test_response_finalize_and_slot_release() -> None:
     failed = LLMResponse(role="err", completion_text="boom")
     await instance.secure_model_response(FakeEvent(), failed)
     assert failed.completion_text == "模型那边抽风了 等会儿再问吧"
+    relayed = make_main(error_reply_prefixes=["上游拦截："])
+    await run_request(relayed, FakeEvent(), ProviderRequest(prompt="问题"))
+    blocked = LLMResponse(role="assistant", completion_text="  上游拦截：内容不合规 https://x.test/")
+    await relayed.secure_model_response(FakeEvent(), blocked)
+    assert blocked.completion_text == "模型那边抽风了 等会儿再问吧"
     await instance.secure_model_response(FakeEvent(), None)
     print("PASS policy: reply finalised generically; slot released")
 
@@ -740,7 +747,28 @@ async def test_chatter_judgement() -> None:
         assert quiet_event.sent == [] and "群友也会叫你" not in quiet_prompts[0]
         [logged] = quiet.store.talk_log()
         assert logged["outcome"] == "PASS"
-        print("PASS policy: chatter judgement sends a line or stays quiet")
+
+        # Someone @-ed her in the batch: her @ answer covers it, so no judgement at all.
+        chat = instance._proactive_chat
+        chat.record("300", "甲", "[图片]", time.monotonic(), sender_id="1", pending=True)
+        chat.record("300", "甲", "@你 好看吗", time.monotonic(), sender_id="1", pending=False, at_her=True)
+        calls = len(prompts)
+        at_batch = FakeEvent("[图片]", messages=[])
+        await instance._judge_chatter(at_batch, "300")
+        assert at_batch.sent == [] and len(prompts) == calls
+        assert "at" in [row["outcome"] for row in instance.store.talk_log()]
+
+        # An @ that lands while the batch is being judged drops the line she was about to send.
+        async def at_meanwhile(system_prompt: str, prompt: str, **_):
+            chat.record("301", "乙", "@你 在吗", time.monotonic(), sender_id="2", pending=False, at_her=True)
+            return "哈哈"
+
+        instance._model_call = at_meanwhile
+        chat.record("301", "甲", "今天好热", time.monotonic(), sender_id="1", pending=True)
+        meanwhile = FakeEvent("今天好热", messages=[])
+        await instance._judge_chatter(meanwhile, "301")
+        assert meanwhile.sent == []
+        print("PASS policy: chatter judgement sends a line or stays quiet; an @ in the batch is left to her @ answer")
 
 
 async def test_work_material_in_the_at_path() -> None:
@@ -1156,17 +1184,20 @@ async def test_judge_sees_images_and_bursts() -> None:
 
 
 async def test_stickers_are_kept_and_sent() -> None:
-    png = b"\x89PNG\r\n\x1a\n"
+    def png(tag: int) -> bytes:
+        out = io.BytesIO()
+        PilImage.new("RGB", (4, 4), (tag, 0, 0)).save(out, "PNG")
+        return out.getvalue()
 
     def image_file(directory: str, name: str, tag: int) -> str:
         path = Path(directory) / name
-        path.write_bytes(png + bytes([tag]) * 20)
+        path.write_bytes(png(tag))
         return str(path)
 
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory + "/judge", roll=0.0, sticker__max_count=2)
         stickers = instance.stickers
-        assert stickers.save(png + b"a" * 20, "无语", 1.0)
+        assert stickers.save(png(97), "无语", 1.0)
         [known] = instance.store.all_stickers()
         seen: list[tuple[str, str]] = []
         answers: list[str] = []
@@ -1237,7 +1268,7 @@ async def test_stickers_are_kept_and_sent() -> None:
 
         # The @ answer path: images she was shown are numbered from 1; the sticker follows her text.
         answered = stateful(directory + "/at", sticker__max_count=5)
-        assert answered.stickers.save(png + b"b" * 20, "收到", 1.0)
+        assert answered.stickers.save(png(98), "收到", 1.0)
         [mine] = answered.store.all_stickers()
         at_event = FakeEvent("看看这个", sender_id="u1")
         request = ProviderRequest(prompt="看看这个", image_urls=[image_file(directory, "at.png", 3)])
@@ -1492,7 +1523,7 @@ async def test_topics_wait_while_she_sleeps() -> None:
 
 
 async def test_model_call_never_raises_and_logs() -> None:
-    instance = make_main(max_concurrency=1)
+    instance = make_main(max_concurrency=1, error_reply_prefixes=["上游拦截："])
     outcomes: list = []
 
     class Provider:
@@ -1508,8 +1539,10 @@ async def test_model_call_never_raises_and_logs() -> None:
     saved = main_module.JUDGE_TIMEOUT_SECONDS, main_module.JOB_TIMEOUT_SECONDS
     main_module.JUDGE_TIMEOUT_SECONDS = main_module.JOB_TIMEOUT_SECONDS = 0.05
     try:
-        outcomes[:] = [" 好 ", "err", RuntimeError("relay down"), "slow", "slow", RuntimeError("again")]
+        outcomes[:] = [" 好 ", "err", "  上游拦截：内容不合规", RuntimeError("relay down"), "slow", "slow", RuntimeError("again")]
         assert await instance._model_call("s", "p") == "好"
+        assert await instance._model_call("s", "p") is None
+        # A relay that passes an upstream refusal on as a normal reply counts as a failure.
         assert await instance._model_call("s", "p") is None
         with mock.patch.object(main_module.logger, "warning") as warn:
             assert await instance._model_call("s", "p") is None

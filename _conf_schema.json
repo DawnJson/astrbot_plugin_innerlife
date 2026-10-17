@@ -61,6 +61,15 @@
         "default": [],
         "hint": "这些环境变量的值在输入、历史、附加内容和回复里一律隐藏。"
       },
+      "error_reply_prefixes": {
+        "description": "当作出错的回复开头",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "有的中转会把上游的拦截或报错当成普通回复返回。回复（去掉开头空白后）以这里任一段文字开头时，按模型出错处理：@ 回答改发 messages.model_error_message，插话不发。"
+      },
       "switch_command": {
         "description": "群主或管理员的开关命令",
         "type": "string",

@@ -66,6 +66,7 @@ class ChatMessage:
     sender_id: str = ""
     images: list = field(default_factory=list)
     reply_to_her: bool = False
+    at_her: bool = False
     # True until a judgement covers this message; False for messages nobody waits on.
     pending: bool = False
 
@@ -104,6 +105,7 @@ class ProactiveChat:
         pending: bool,
         images: list | None = None,
         reply_to_her: bool = False,
+        at_her: bool = False,
     ) -> ChatMessage:
         # One line per message and no member named like the bot, so a member
         # cannot forge a transcript line that reads as the bot's own words.
@@ -118,6 +120,7 @@ class ProactiveChat:
             sender_id,
             images or [],
             reply_to_her,
+            at_her,
             pending,
         )
         if pending:
@@ -230,6 +233,15 @@ class ProactiveChat:
             for entry in state.messages
             if now - entry.at <= TRANSCRIPT_WINDOW_SECONDS
         ][-PROMPT_MESSAGES:]
+
+    def mentioned_since(self, group_id: str, entries: list[ChatMessage]) -> bool:
+        """Whether someone @-ed her at or after the first unjudged line of `entries`, counting
+        messages that arrived while the batch was being judged; her @ answer covers those."""
+        first = next((e for e in entries if e.pending), None)
+        messages = list(self._state(group_id).messages)
+        if first is None or first not in messages:
+            return False
+        return any(e.at_her for e in messages[messages.index(first) :])
 
     def finish_judgement(self, entries: list[ChatMessage]) -> None:
         for entry in entries:

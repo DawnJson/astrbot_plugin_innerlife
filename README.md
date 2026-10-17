@@ -13,7 +13,7 @@
 - **日记**：每天 8 节固定模板，外加周记、月记；最近几天的日记会影响她今天的状态。
 - **生活**：每天醒来给自己排日程（最后一行定当晚几点睡，睡 7 小时），看所在城市的天气、节假日和新闻；群里安静时可能自己开个话头（睡着时不开）。
 - **连发**：闲聊时按打字速度分几条发出，答疑和多步说明始终一条。
-- **识图、画图、表情包**：看群里的图片和表情包；遇到真心喜欢的反应图会收藏起来（`sticker.*`，只收 png/jpg/gif/webp，真人照片、带个人信息的截图、敏感内容不收），之后在合适的时候自己发出去，可以只发一张表情；接上能返回图片的 MCP 服务后可以自己决定画图，经过屏蔽词和每日次数检查。
+- **识图、画图、表情包**：看群里的图片和表情包；遇到真心喜欢的反应图会收藏起来（`sticker.*`，只收 png/jpg/gif/webp，真人照片、带个人信息的截图、敏感内容不收，存的时候最长边缩到 240 像素、动图保留动画），之后在合适的时候自己发出去，可以只发一张表情；接上能返回图片的 MCP 服务后可以自己决定画图，经过屏蔽词和每日次数检查。
 - **安全底线**：高危请求拒绝、密钥脱敏、链接白名单、提示词注入防护、冷却、并发和排队、`/机器人 开启/关闭` 开关。她不把任何工具交给模型：模型请求里的工具一律清空。
 
 ## 环境要求
@@ -23,7 +23,7 @@
 - 一个聊天模型。可选：一个后台模型（插话判断、整理、日记等，`basic.background_provider_id`）、一个能返回图片的 MCP 服务
 - 后台任务需要访问外网：天气 [open-meteo](https://open-meteo.com/)、节假日 [holiday-cn](https://github.com/NateScarlet/holiday-cn)、新闻 RSS（默认是几个中文科技和游戏站，可改 `life.news_feeds`）
 
-没有额外的 Python 依赖（`httpx`、`mcp` 随 AstrBot 安装）。
+没有额外的 Python 依赖（`httpx`、`mcp`、`Pillow` 随 AstrBot 安装）。
 
 ## 安装
 
@@ -32,7 +32,7 @@ cd AstrBot/data/plugins
 git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 ```
 
-重启 AstrBot，在 WebUI 的插件配置里改设置。启动时插件会创建（或更新）一个 AstrBot 人格 `basic.astrbot_persona_id`（默认 `innerlife`）。这个人格只用来在模型调用报错时给群里一句统一的出错提示（文字取自 `messages.model_error_message`）；她平时的人设和系统提示词每次请求都由插件现拼，不读这个人格。要让出错提示生效，把它设成 AstrBot 的默认人格。
+重启 AstrBot，在 WebUI 的插件配置里改设置。启动时插件会创建（或更新）一个 AstrBot 人格 `basic.astrbot_persona_id`（默认 `innerlife`）。这个人格只用来在模型调用报错时给群里一句统一的出错提示（文字取自 `messages.model_error_message`）；她平时的人设和系统提示词每次请求都由插件现拼，不读这个人格。要让出错提示生效，把它设成 AstrBot 的默认人格。有的中转会把上游的拦截当成普通回复返回，把这类回复的开头填进 `basic.error_reply_prefixes`，它们就按出错处理。
 
 ## 配置
 
@@ -62,6 +62,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 | `basic.bot_names` | 群友对她的称呼，用来判断是不是在叫她 |
 | `basic.group_ids` | 生效的群号；空表示所有群 |
 | `basic.allowed_link_domains` | 回复里允许出现的 HTTPS 域名；空表示不发任何链接。不带 `://` 的 `settings.json`、`config.yaml` 这类文件名（后缀不是真实顶级域名）不算链接 |
+| `basic.error_reply_prefixes` | 当作出错的回复开头（去掉开头空白后比较）；默认空。中转把上游拦截当普通回复返回时填，命中后 @ 回答改发 `messages.model_error_message`，插话不发 |
 | `life.city_name` / `life.latitude` / `life.longitude` / `basic.timezone` | 她"住"的城市和时区，用于天气和作息 |
 | `basic.background_provider_id` | 后台调用用的模型提供商；留空用聊天模型 |
 
