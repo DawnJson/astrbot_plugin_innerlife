@@ -1810,6 +1810,15 @@ async def test_talk_gate() -> None:
         talker.note_bot_message(GROUP_ID, "【渠道恢复】正常")
         row = talker.store.talk(GROUP_ID)
         assert abs(row["her"] - 1.0) < 0.01 and abs(row["total"] - 3.0) < 0.01
+        # An @ answer, burst included, is a group line, not her unprompted share, but it warms her up.
+        asked = FakeEvent("@ 在吗")
+        asked.set_extra(main_module._BURST_CAP_KEY, 3)
+        asked.set_result(model_result("在<sp>干嘛"))
+        await talker.secure_decorated_result(asked)
+        await talker.after_reply_sent(asked)
+        row = talker.store.talk(GROUP_ID)
+        assert abs(row["her"] - 1.0) < 0.01 and abs(row["total"] - 5.0) < 0.01
+        assert row["heat"] > talker.s.talk_contagion
     print("PASS policy: the gate rolls before any model call; busy and fuse leave or resolve batches; state follows the chat")
 
 

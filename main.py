@@ -445,10 +445,13 @@ class Main(star.Star):
             if (message := finalize_reply(part, self.secrets, self.s.allowed_link_domains))
         ]
 
-    def _note_reply(self, group_id: str, text: str, *, spend: bool = True, own: bool = True):
+    def _note_reply(
+        self, group_id: str, text: str, *, spend: bool = True, own: bool = True, answer: bool = False
+    ):
         """Put her own line in the transcript, the day's log and the talk state, and persist her energy.
 
-        A line another plugin sent on its own (`own=False`) counts as a group line, not her talking."""
+        A line another plugin sent on its own (`own=False`) counts as a group line, not her talking;
+        an `answer` to someone who asked her is her talking but not her unprompted share."""
         entry = self._proactive_chat.record_reply(
             group_id, text, time.monotonic(), spend=spend
         )
@@ -457,7 +460,7 @@ class Main(star.Star):
         if self.store is not None:
             state = self._talk_state(group_id)
             if own:
-                state.said(1, self.s.talk_contagion)
+                state.said(1, self.s.talk_contagion, unprompted=not answer)
             else:
                 state.heard()
             self._save_talk(group_id, state)
@@ -535,12 +538,12 @@ class Main(star.Star):
         if marker.draw and self.s.draw and self.gate is not None:
             event.set_extra(_DRAW_KEY, marker.draw)
 
-    async def _send_rest(self, send, group_id: str, parts: list[str]) -> None:
+    async def _send_rest(self, send, group_id: str, parts: list[str], *, answer: bool = False) -> None:
         """The later messages of a burst, each after a typing-speed pause."""
         for part in parts:
             await asyncio.sleep(typing_delay(part, random.random()))
             await send(MessageChain().message(part))
-            self._note_reply(group_id, part, spend=False)
+            self._note_reply(group_id, part, spend=False, answer=answer)
 
     async def _draw_and_send(self, event, prompt: str, send) -> None:
         """Draw what she asked for through the gated tool and send it; the files are deleted after.
@@ -578,14 +581,14 @@ class Main(star.Star):
             return None
         return marker.sticker
 
-    async def _send_sticker(self, send, group_id: str, sticker_id: int) -> None:
+    async def _send_sticker(self, send, group_id: str, sticker_id: int, *, answer: bool = False) -> None:
         taken = self.stickers.take(sticker_id)
         if taken is None:
             return
         path, description = taken
         await send(MessageChain(chain=[Image.fromFileSystem(str(path))]))
         self.store.use_sticker(sticker_id, time.time())
-        self._note_reply(group_id, f"[表情包：{description}]", spend=False)
+        self._note_reply(group_id, f"[表情包：{description}]", spend=False, answer=answer)
 
     def _keep_stickers(self, marker: Marker, image_refs: list[str]) -> None:
         """Keep the images she marked from the ones she was shown, numbered from 1."""
@@ -641,7 +644,7 @@ class Main(star.Star):
         if not line or len(line) > 60:
             return
         await event.send(MessageChain().message(line))
-        self._note_reply(str(event.get_group_id()), line)
+        self._note_reply(str(event.get_group_id()), line, answer=True)
 
     # ---- model calls and background upkeep: weather, schedule, news, the night's work, ignored, topics
 
@@ -1404,7 +1407,7 @@ class Main(star.Star):
                 event.set_extra(_BURST_REST_KEY, messages[1:])
                 if _in_scope(event):
                     group_id = str(event.get_group_id())
-                    self._note_reply(group_id, plain_components[0].text)
+                    self._note_reply(group_id, plain_components[0].text, answer=True)
                     budget = event.get_extra(_BUDGET_KEY)
                     if budget is not None and self.store is not None:
                         self._log_talk(
@@ -1436,8 +1439,8 @@ class Main(star.Star):
         event.set_extra(_BURST_REST_KEY, [])
         event.set_extra(_STICKER_KEY, None)
         event.set_extra(_DRAW_KEY, "")
-        await self._send_rest(event.send, group_id, rest)
+        await self._send_rest(event.send, group_id, rest, answer=True)
         if sticker is not None:
-            await self._send_sticker(event.send, group_id, sticker)
+            await self._send_sticker(event.send, group_id, sticker, answer=True)
         if draw:
             await self._draw_and_send(event, draw, event.send)

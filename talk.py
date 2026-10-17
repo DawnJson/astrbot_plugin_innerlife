@@ -39,7 +39,8 @@ BUDGET_SIGMA = 0.4  # spread of the log-normal noise main.py draws
 
 @dataclass
 class TalkState:
-    """One group's talking state; `her` and `total` are decayed line counts."""
+    """One group's talking state; `her` (the lines she said without being asked) and `total`
+    (every line) are decayed line counts."""
 
     bias: float = BIAS_START
     her: float = 0.0
@@ -59,7 +60,7 @@ class TalkState:
         self.updated_at = now
 
     def share_now(self, target: float) -> float:
-        """Her share of the lines lately; with too little data it counts as on target."""
+        """Her unprompted share of the lines lately; with too little data it counts as on target."""
         return self.her / self.total if self.total >= MIN_TOTAL_FOR_SHARE else target
 
     def steer(self, target: float) -> None:
@@ -69,8 +70,11 @@ class TalkState:
             max(BIAS_RANGE[0], self.bias + BIAS_RATE * (target - self.share_now(target))),
         )
 
-    def said(self, lines: int, contagion: float) -> None:
-        self.her += lines
+    def said(self, lines: int, contagion: float, *, unprompted: bool = True) -> None:
+        """Her lines warm her up; only the ones nobody asked for count towards her share,
+        since the bias can't make her skip an answer."""
+        if unprompted:
+            self.her += lines
         self.total += lines
         self.heat += contagion * lines
 

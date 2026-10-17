@@ -153,8 +153,8 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 - **兴致** `energy`（0–100，存 `mood.energy`，全群共用）：安静时按 `energy = 100 − (100 − energy)·exp(−Δt / (talk.stamina_minutes·60))` 恢复；她每发一行扣随机 10–35。
 - **每群状态**（`talk` 表：`group_id, bias, her, total, heat, urge, updated_at`，重启接上）：
-  - `her` / `total`：她的行数 / 全部行数（群友每条消息 `total+1`；她每发一行 `her+1`、`total+1`），都按半衰期 1 天衰减。`share_now = her / total`；`total < 20` 时数据太少，视为等于目标 `talk.share`。
-  - `bias`：开口倾向的底，初值 −2.0；每个决策点 `bias += 0.05·(share − share_now)`，夹在 [−6, −1]。她说得比目标少，倾向慢慢升；说得比目标多，慢慢降。
+  - `her` / `total`：她主动说的行数 / 全部行数（群友每条消息 `total+1`；她没被 @ 时插的话、开的话题每行 `her+1`、`total+1`；她回答 @、骂回去的每行只 `total+1`；功能插件的通知只 `total+1`），都按半衰期 1 天衰减。`share_now = her / total`；`total < 20` 时数据太少，视为等于目标 `talk.share`。回答不算进 `her`，是因为倾向管不住回答：被 @ 得多时如果算进去，占比会一直高于目标，倾向被压到底，她该接的闲话也不接了。
+  - `bias`：开口倾向的底，初值 −2.0；每个决策点 `bias += 0.05·(share − share_now)`，夹在 [−6, −1]。她主动说得比目标少，倾向慢慢升；说得比目标多，慢慢降。
   - `heat`：热度，她发言时 `+= talk.contagion`，按 `exp(−Δt / 240s)` 衰减。
   - `urge`（0–1）：想开新话题的冲动，见下。
 
