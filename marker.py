@@ -150,7 +150,7 @@ def marker_rules(
     if emotion:
         fields.append(
             "e：你因这条消息产生的明显情绪，每项 {\"k\":情绪,\"i\":强度0到1,\"to\":对象昵称(可省),\"why\":原因20字内}。"
-            f"k 只能从这些里选：{'、'.join(KINDS)}。平淡就不写。"
+            f"k 只能从这些里选：{'、'.join(KINDS)}。平淡就不写。有人问你工作上的事、追问或报问题都不算冒犯，不要因此记负面情绪。"
         )
     if emotion or memory:
         part = "p：对说话人的记录，每项 {\"n\":昵称"
