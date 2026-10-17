@@ -13,6 +13,7 @@ TRANSCRIPT_WINDOW_SECONDS = 15 * 60
 MAX_MESSAGE_CHARS = 300
 MAX_SPEAKER_CHARS = 20
 MAX_REPLY_CHARS = 100
+MAX_WORK_REPLY_CHARS = 600  # an answer to a work question: conclusion, a few steps, a link
 QUIET_SECONDS = 3
 BURST_MESSAGES = 8
 STALE_REPLY_SECONDS = 60
@@ -41,17 +42,17 @@ def _one_line(text: str, limit: int) -> str:
     return " ".join(text.split())[:limit]
 
 
-def parse_reply(answer: str) -> str | None:
-    """Return the line to send, or None for PASS, empty, or overlong output."""
+def parse_reply(answer: str, *, work: bool = False) -> str | None:
+    """Return the line to send, or None for PASS, empty, or overlong output.
+    A work answer may run to several lines; small talk stays one or two short lines."""
     text = answer.strip()
     for prefix in (f"{SELF_SPEAKER}：", f"{SELF_SPEAKER}:"):
         text = text.removeprefix(prefix).strip()
-    if (
-        not text
-        or PASS_MARKER in text.upper()[:12]
-        or len(text) > MAX_REPLY_CHARS
-        or text.count("\n") > 1
-    ):
+    if not text or PASS_MARKER in text.upper()[:12]:
+        return None
+    if work:
+        return text if len(text) <= MAX_WORK_REPLY_CHARS else None
+    if len(text) > MAX_REPLY_CHARS or text.count("\n") > 1:
         return None
     return text
 

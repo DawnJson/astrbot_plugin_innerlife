@@ -1041,7 +1041,7 @@ class Main(star.Star):
                 self._apply_marker(marker, group_id, speakers)
                 self._keep_stickers(marker, images)
                 parts = split_parts(text)
-                line = parse_reply(parts[0]) if parts else None
+                line = parse_reply(parts[0], work=bool(material)) if parts else None
                 messages = (
                     self._burst_messages(
                         [line, *(r for part in parts[1:] if (r := parse_reply(part)))]

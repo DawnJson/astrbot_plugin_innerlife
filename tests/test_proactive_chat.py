@@ -8,6 +8,7 @@ from astrbot_plugin_innerlife.proactive_chat import (  # noqa: E402
     BURST_MESSAGES,
     CHATTER_PROMPT,
     ENERGY_COST_RANGE,
+    MAX_WORK_REPLY_CHARS,
     MOODS,
     ProactiveChat,
     parse_reply,
@@ -29,6 +30,13 @@ class ParseTests(unittest.TestCase):
         for rejected in ("", "PASS", "pass，不说了", "一\n二\n三", "长" * 101):
             with self.subTest(rejected=rejected):
                 self.assertIsNone(parse_reply(rejected))
+
+    def test_parse_reply_lets_a_work_answer_run_longer(self) -> None:
+        answer = "结论先说\n第一步\n第二步\n详见 https://example.com/doc" + "字" * 400
+        self.assertIsNone(parse_reply(answer))
+        self.assertEqual(parse_reply(answer, work=True), answer)
+        self.assertIsNone(parse_reply("PASS", work=True))
+        self.assertIsNone(parse_reply("长" * (MAX_WORK_REPLY_CHARS + 1), work=True))
 
 
 class JudgementTests(unittest.TestCase):
