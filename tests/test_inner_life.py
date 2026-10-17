@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from support import make_config, make_settings
 
@@ -435,6 +436,16 @@ class MindTests(unittest.TestCase):
             ordinary = emotion.decayed_intensity(0.8, later, T, grudge=True)
             self.assertGreater(intensity, ordinary)
 
+    def test_temper_flare_only_applies_to_emotions_aimed_at_someone(self) -> None:
+        touchy = dataclasses.replace(make_settings(), temperament=dataclasses.replace(T, temper_flare=2.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            mind = Mind(Store(Path(tmp) / "innerlife.db"), touchy)
+            mind.feel("无聊", 0.4, None, "没事干", 0.0)
+            mind.feel("烦躁", 0.4, "9", "被抬杠", 0.0)
+            felt = {kind: intensity for kind, intensity, _, _ in mind.active_emotions(0.0)}
+            self.assertAlmostEqual(felt["无聊"], 0.4)
+            self.assertAlmostEqual(felt["烦躁"], 0.8)
+
     def test_state_text_hides_private_memories_and_offers_venting_to_friends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
@@ -519,6 +530,42 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(calls), 3)
             self.assertTrue(await jobs.run_night(store, call, settings, monday, now))
             self.assertEqual(len(calls), 3)
+
+    async def test_a_long_day_is_read_in_chunks(self) -> None:
+        today = datetime.date(2026, 10, 16)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "innerlife.db")
+            now = time.time()
+            for index in range(6):
+                store.log_line("g", "1", "甲", f"第{index}件事" + "字" * 30, now - 100 + index)
+            draft = store.add_memory("1", "g", "草稿", False, now)
+            seen: dict[str, list[str]] = {"consolidate": [], "summary": [], "daily": []}
+
+            async def call(system: str, prompt: str):
+                if system == memory.CONSOLIDATION_PROMPT:
+                    seen["consolidate"].append(prompt)
+                    n = len(seen["consolidate"])
+                    return f'{{"memories":[{{"id":null,"user":"1","text":"记{n}","private":0}}]}}'
+                if system == diary.CHUNK_SUMMARY_PROMPT:
+                    seen["summary"].append(prompt)
+                    return f"摘要{len(seen['summary'])}"
+                seen["daily"].append(prompt)
+                return "## 心情曲线\n好"
+
+            with mock.patch.object(jobs, "CONSOLIDATION_MAX_CHARS", 100):
+                self.assertTrue(await jobs.run_night(store, call, make_settings(), today, now))
+            self.assertGreater(len(seen["consolidate"]), 1)
+            self.assertEqual(len(seen["summary"]), len(seen["consolidate"]))
+            for index in range(6):
+                self.assertEqual(sum(f"第{index}件事" in p for p in seen["consolidate"]), 1)
+                self.assertEqual(sum(f"第{index}件事" in p for p in seen["summary"]), 1)
+            self.assertTrue(all("第0件事" not in p for p in seen["daily"]))
+            self.assertIn("摘要1", seen["daily"][0])
+            self.assertEqual(store.chat_log(), [])
+            self.assertEqual(
+                sorted(m["content"] for m in store.all_memories() if m["id"] != draft),
+                sorted(f"记{n}" for n in range(1, len(seen["consolidate"]) + 1)),
+            )
 
     async def test_failed_step_keeps_the_log_and_retries_only_that_step(self) -> None:
         today = datetime.date(2026, 10, 16)
@@ -650,12 +697,18 @@ class NightJobTests(unittest.IsolatedAsyncioTestCase):
         for schedule, window in cases.items():
             self.assertEqual(jobs.sleep_window(schedule, day, tz), window, schedule)
 
-    async def test_log_text_uses_the_given_timezone(self) -> None:
+    async def test_log_chunks_use_the_given_timezone_and_cover_every_line(self) -> None:
         row = {"at": 0.0, "name": "甲", "user_id": "1", "text": "嗨"}
         utc = datetime.timezone.utc
         plus8 = datetime.timezone(datetime.timedelta(hours=8))
-        self.assertEqual(jobs.log_text([row], 100, utc), "00:00 甲(1)：嗨")
-        self.assertEqual(jobs.log_text([row], 100, plus8), "08:00 甲(1)：嗨")
+        self.assertEqual(jobs.log_chunks([row], 100, utc), ["00:00 甲(1)：嗨"])
+        self.assertEqual(jobs.log_chunks([row], 100, plus8), ["08:00 甲(1)：嗨"])
+        self.assertEqual(jobs.log_chunks([], 100, utc), [""])
+        rows = [{**row, "text": str(n) * 10} for n in range(5)]  # each line is 21 characters
+        chunks = jobs.log_chunks(rows, 50, utc)
+        self.assertEqual(len(chunks), 3)
+        self.assertTrue(all(len(chunk) <= 50 for chunk in chunks))
+        self.assertEqual("\n".join(chunks), "\n".join(jobs.log_chunks(rows, 10**6, utc)))
 
 
 class SettingsTests(unittest.TestCase):

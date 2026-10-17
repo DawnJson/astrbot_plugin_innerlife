@@ -27,6 +27,8 @@ AFFINITY_WEIGHT = 1.0
 AFFINITY_RANGE = (-0.6, 1.0)
 AROUSAL_WEIGHT = 0.8
 COUNT_WEIGHT = 0.5
+WORK_WEIGHT = 4.0  # the batch's questions got work material
+ASLEEP_WEIGHT = -2.0
 
 TOPIC_RATE = 0.0127  # per minute at full urge and full energy
 TOPIC_SENT_URGE = 0.3
@@ -100,6 +102,8 @@ def chat_logit(
     arousal: float,
     energy: float,
     count: int,
+    work: bool = False,
+    asleep: bool = False,
 ) -> float:
     """The log-odds of speaking up on a batch of `count` new messages; `affinity` is 0-100."""
     return (
@@ -112,6 +116,8 @@ def chat_logit(
         + math.log(breadth(energy))
         + state.heat
         + COUNT_WEIGHT * math.log(count)
+        + WORK_WEIGHT * work
+        + ASLEEP_WEIGHT * asleep
     )
 
 

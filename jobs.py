@@ -11,6 +11,7 @@ from astrbot.api import logger
 
 from . import life
 from .diary import (
+    CHUNK_SUMMARY_PROMPT,
     DAILY_PROMPT,
     MONTHLY_PROMPT,
     WEEKLY_PROMPT,
@@ -36,7 +37,7 @@ from .talk import TALK_LOG_KEEP_DAYS
 # call(system_prompt, prompt) -> the model's text, None on any failure
 ModelCall = Callable[[str, str], Awaitable[str | None]]
 
-CONSOLIDATION_MAX_CHARS = 24000  # of the day's chat log one consolidation or diary reads
+CONSOLIDATION_MAX_CHARS = 24000  # of the day's chat log one consolidation or diary model call reads
 SLEEP_HOURS = 7
 DEFAULT_BEDTIME = datetime.time(0, 0)  # for a day without a schedule or without a bedtime line
 _BEDTIME_RE = re.compile(r"^\s*(\d{1,2})[:：](\d{2})\s*\S*睡", re.M)
@@ -68,17 +69,25 @@ def _clock(at: float, tz: datetime.tzinfo) -> str:
     return datetime.datetime.fromtimestamp(at, tz).strftime("%H:%M")
 
 
-def log_text(rows, limit: int, tz: datetime.tzinfo) -> str:
-    lines = [
-        f"{_clock(row['at'], tz)} {row['name']}({row['user_id']})：{row['text']}"
-        for row in rows
-    ]
-    text = "\n".join(lines)
-    return text[-limit:]
+def log_chunks(rows, limit: int, tz: datetime.tzinfo) -> list[str]:
+    """The whole log as consecutive chunks of at most `limit` characters (a line is never
+    split; one longer than `limit` is cut); an empty log is one empty chunk."""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for row in rows:
+        line = f"{_clock(row['at'], tz)} {row['name']}({row['user_id']})：{row['text']}"[:limit]
+        if current and size + 1 + len(line) > limit:
+            chunks.append("\n".join(current))
+            current, size = [], 0
+        size += len(line) + (1 if current else 0)
+        current.append(line)
+    return [*chunks, "\n".join(current)]
 
 
 async def consolidate(store: Store, call: ModelCall, tz: datetime.tzinfo, now: float) -> bool:
-    """Check the day's drafts against the chat log; True when done (or nothing to do)."""
+    """Check the day's drafts against the chat log, one model call per chunk of it; True when
+    done (or nothing to do). Nothing is written unless every call parsed."""
     drafts = store.drafts()
     rows = store.chat_log()
     if not drafts and not rows:
@@ -90,10 +99,8 @@ async def consolidate(store: Store, call: ModelCall, tz: datetime.tzinfo, now: f
         for memory in store.memories_of(user_id)
         if memory["status"] == "kept"
     ]
-    prompt = (
-        "【今天的群聊记录】\n"
-        + log_text(rows, CONSOLIDATION_MAX_CHARS, tz)
-        + "\n\n【草稿记忆】\n"
+    tail = (
+        "\n\n【草稿记忆】\n"
         + "\n".join(
             f"#{d['id']} {d['user_id']}{' [私密]' if d['private'] else ''}：{d['content']}"
             for d in drafts
@@ -104,15 +111,18 @@ async def consolidate(store: Store, call: ModelCall, tz: datetime.tzinfo, now: f
             for m in kept
         )
     )
-    result = parse_consolidation(
-        await call(CONSOLIDATION_PROMPT, prompt) or ""
-    )
-    if result is None:
-        return False
+    results = []
+    for chunk in log_chunks(rows, CONSOLIDATION_MAX_CHARS, tz):
+        result = parse_consolidation(
+            await call(CONSOLIDATION_PROMPT, "【今天的群聊记录】\n" + chunk + tail) or ""
+        )
+        if result is None:
+            return False
+        results.append(result)
     known = {row["id"]: row for row in (*drafts, *kept)}
     decided: set[int] = set()
     dropped: list[int] = []
-    for verdict in result.memories:
+    for verdict in (v for result in results for v in result.memories):
         if verdict.id is None:
             row = users.get(verdict.user)
             if row is not None:
@@ -136,9 +146,10 @@ async def consolidate(store: Store, call: ModelCall, tz: datetime.tzinfo, now: f
         if draft["id"] not in decided:
             store.update_memory(draft["id"], draft["content"], bool(draft["private"]), "kept")
     store.delete_memories(dropped)
-    for user_id, impression in result.impressions.items():
-        if store.person(user_id) is not None:
-            store.set_impression(user_id, impression, now)
+    for result in results:
+        for user_id, impression in result.impressions.items():
+            if store.person(user_id) is not None:
+                store.set_impression(user_id, impression, now)
     return True
 
 
@@ -203,11 +214,22 @@ async def write_daily(
     ]
     if not emotions and not store.chat_log():
         return True
+    chunks = log_chunks(store.chat_log(), CONSOLIDATION_MAX_CHARS, tz)
+    if len(chunks) > 1:
+        summaries = []
+        for number, chunk in enumerate(chunks, 1):
+            summary = await call(CHUNK_SUMMARY_PROMPT, chunk)
+            if not summary or not summary.strip():
+                return False
+            summaries.append(f"第{number}段：{summary.strip()}")
+        log = "（记录太长，按时间分成几段，下面是每段的摘要）\n" + "\n".join(summaries)
+    else:
+        log = chunks[0]
     prompt = (
         f"日期：{day}\n\n【情绪记录】\n" + "\n".join(emotions)
         + "\n\n【今天的生活】\n"
         + (f"天气：{life_row['weather']}\n日程：\n{life_row['schedule']}" if life_row else "")
-        + "\n\n【群聊记录】\n" + log_text(store.chat_log(), CONSOLIDATION_MAX_CHARS, tz)
+        + "\n\n【群聊记录】\n" + log
         + "\n\n【新记住的小事】\n" + "\n".join(memories)
         + "\n\n【今天接触的人和现在的印象】\n" + "\n".join(people)
     )

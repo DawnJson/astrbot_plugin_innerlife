@@ -33,6 +33,12 @@ class GateTests(unittest.TestCase):
         # Affinity is clamped to [-0.6, 1] and tiredness to a floor of 5%.
         self.assertAlmostEqual(logit(affinity=500.0) - logit(affinity=0.0), 1.0)
         self.assertAlmostEqual(logit(affinity=-500.0) - logit(affinity=0.0), -0.6)
+        self.assertAlmostEqual(logit(work=True) - logit(), talk.WORK_WEIGHT)
+        self.assertAlmostEqual(logit(asleep=True) - logit(), talk.ASLEEP_WEIGHT)
+        # Material for a question lifts the odds a lot but never to certainty at her usual bias.
+        usual = TalkState(bias=-2.0)
+        self.assertLess(talk.probability(logit(usual, work=True, question=True, energy=10.0), 1.0), 1.0)
+        self.assertGreater(talk.probability(logit(usual, work=True, question=True, energy=10.0), 1.0), 0.5)
         self.assertAlmostEqual(logit(energy=0.0), logit(energy=5.0))
 
     def test_temperature_spreads_the_odds(self) -> None:

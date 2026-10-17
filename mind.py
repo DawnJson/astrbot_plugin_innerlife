@@ -68,7 +68,7 @@ class Mind:
         now: float,
         held: float = 1.0,
     ) -> None:
-        if KINDS[kind][0] < 0:
+        if KINDS[kind][0] < 0 and target:
             intensity = min(1.0, intensity * self.s.temperament.temper_flare)
         self.store.add_emotion(kind, target, intensity, cause, now, held)
         self._push(kind, intensity, now)

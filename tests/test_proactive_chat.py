@@ -63,8 +63,12 @@ class ChatStateTests(unittest.IsolatedAsyncioTestCase):
         entries = chat.begin_judgement("1", 1000.0)
         self.assertEqual(entries, [fresh])
         self.assertIsNone(chat.begin_judgement("1", 1000.0))
-        self.assertEqual(chat.numbered_transcript(entries), "1. 乙：刚才")
+        self.assertEqual(chat.numbered_transcript(entries, 1180.0), "1. 3分钟前 乙：刚才")
         self.assertEqual(chat.fresh(entries), [fresh])
+        record(chat, "丙", "要不要吃饭？", 1100.0, pending=True)
+        record(chat, "丁", "什么时候营业？", 1000.0, pending=True)
+        self.assertEqual(chat.pending_questions("1", 1180.0, "x"), ["要不要吃饭？", "什么时候营业？"])
+        self.assertEqual(chat.pending_questions("1", 1180.0, "x", seconds=100.0), ["要不要吃饭？"])
         chat.finish_judgement(entries)
         self.assertEqual(chat.fresh(entries), [])
 

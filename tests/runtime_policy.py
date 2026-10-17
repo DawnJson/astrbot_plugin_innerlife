@@ -723,7 +723,7 @@ async def test_chatter_judgement() -> None:
         assert system_prompt.startswith(instance.safety_prompt + "\n\n测试人设\n\n")
         assert "只输出下面两种之一" in system_prompt
         assert prompt.startswith("你此刻的状态：") and "群友也会叫你：小测\n" in prompt
-        assert prompt.endswith("1. 甲：今天好热")
+        assert prompt.endswith("1. 0分钟前 甲：今天好热")
 
         event, entries = await judged("PASS", ["随便聊聊"])
         assert event.sent == [] and not entries[0].pending
@@ -846,7 +846,47 @@ async def test_work_material_in_the_at_path() -> None:
         silent = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
         await asyncio.wait_for(mute.handle_group_chatter(silent), 1)
         assert mute.store.talk_log() == []
-        print("PASS policy: work material from every source forms one section after persona and job; @ stays the only way in")
+
+        # An @ answer also covers the questions others asked in the same moment, never the asker's own.
+        pair = stateful(directory + "/pair", roll=1.0, cooldown_seconds=0)
+        pair_source = FakeSource("资料")
+        pair.context = make_context(pair_source)
+        chat = pair._proactive_chat
+        chat.record(GROUP_ID, "乙", "什么时候营业？", time.monotonic(), sender_id="u2", pending=True)
+        chat.record(GROUP_ID, "甲", "你在吗？", time.monotonic(), sender_id="u1", pending=True)
+        asker = FakeEvent("哈哈", sender_id="u1")
+        request = ProviderRequest(prompt="哈哈")
+        await pair.guard_waiting_request(asker)
+        await pair.secure_model_request(asker, request)
+        await pair.apply_persona(asker, request)
+        assert pair_source.calls == [("哈哈\n什么时候营业？", GROUP_ID)]
+        assert "- 什么时候营业？" in request.system_prompt and "- 你在吗？" not in request.system_prompt
+        pair._release_slot(asker)
+
+        # A member who keeps @-ing her: from the 4th answer on the prompt lets her answer short or not at all.
+        poke = stateful(directory + "/poke", roll=1.0, cooldown_seconds=0)
+        for number in range(main_module.AT_REPEAT_COUNT + 1):
+            event = FakeEvent("戳", sender_id="u1")
+            request = ProviderRequest(prompt="戳")
+            await poke.guard_waiting_request(event)
+            await poke.secure_model_request(event, request)
+            await poke.apply_persona(event, request)
+            assert ("一直在 @ 你" in request.system_prompt) == (number == main_module.AT_REPEAT_COUNT)
+            await poke.secure_model_response(event, LLMResponse(role="assistant", completion_text="嗯"))
+        other = FakeEvent("戳", sender_id="u2")
+        other_request = ProviderRequest(prompt="戳")
+        await poke.guard_waiting_request(other)
+        await poke.secure_model_request(other, other_request)
+        await poke.apply_persona(other, other_request)
+        assert "一直在 @ 你" not in other_request.system_prompt
+        poke._release_slot(other)
+
+        # A reply that is exactly PASS sends nothing, no error text, and does not count as an answer.
+        passing = FakeEvent("戳", sender_id="u1")
+        response = LLMResponse(role="assistant", completion_text="PASS")
+        await poke.secure_model_response(passing, response)
+        assert response.completion_text == "" and passing.sent == []
+        assert len(poke._recent_at_answers((GROUP_ID, "u1"))) == main_module.AT_REPEAT_COUNT + 1
 
 
 class FakeGate:
@@ -1694,6 +1734,7 @@ async def test_talk_gate() -> None:
         gate, _ = fresh("gate", roll=1.0)
         chat = gate._proactive_chat
         gate.bot_names = ["Tester"]
+        gate.upkeep.asleep = lambda dt: False
 
         def chance(group: str, text: str, **kwargs):
             chat.record(
@@ -1708,6 +1749,9 @@ async def test_talk_gate() -> None:
         assert named > plain and replied > plain and asked > plain
         assert named_features["mention"] and not plain_features["mention"]
         assert replied_features["reply"] and not plain_features["reply"]
+        gate.upkeep.asleep = lambda dt: True
+        dozing, dozing_features = chance("g5", "今天好热")
+        assert dozing_features["asleep"] and not plain_features["asleep"] and dozing < plain
 
         # A missed roll makes no model call and still resolves the batch.
         quiet, prompts = fresh("quiet", roll=1.0)
@@ -1735,7 +1779,7 @@ async def test_talk_gate() -> None:
         )
         busy._llm_slots.release()
         await busy._judge_chatter(event, GROUP_ID)
-        assert len(prompts) == 1 and "1. 甲：第一句" in prompts[0] and "2. 甲：第二句" in prompts[0]
+        assert len(prompts) == 1 and "1. 0分钟前 甲：第一句" in prompts[0] and "2. 0分钟前 甲：第二句" in prompts[0]
         assert not first.pending
 
         # A spent fuse stops judging; the batch is resolved without a model call.
@@ -1762,11 +1806,12 @@ async def test_talk_gate() -> None:
         assert logged["outcome"] == "skip" and logged["p"] < 1.0
         assert json.loads(logged["features"])["question"] is True
 
-        # A question that plugins have material for is work: no roll, the judge gets the material.
+        # A question that plugins have material for is a strong feature, not a certainty: the dice still
+        # rolls, and her real mood replaces the work mood.
         systems: list[str] = []
 
         def worker(name: str, source: FakeSource, **overrides) -> tuple[Main, list[str]]:
-            instance, prompts = fresh(name, roll=1.0, **overrides)
+            instance, prompts = fresh(name, **{"roll": 1.0, **overrides})
             instance.context = make_context(source)
 
             async def call(system_prompt: str, prompt: str, **_):
@@ -1778,7 +1823,7 @@ async def test_talk_gate() -> None:
             return instance, prompts
 
         source = FakeSource("门店资料：周一休息")
-        work, prompts = worker("work", source, work_background="你在这里做客服")
+        work, prompts = worker("work", source, roll=0.0, work_background="你在这里做客服")
         chat = work._proactive_chat
         chat.record(GROUP_ID, "甲", "今天好热", time.monotonic(), sender_id="1", pending=True)
         entry = chat.record(GROUP_ID, "乙", "什么时候营业？", time.monotonic(), sender_id="2", pending=True)
@@ -1791,7 +1836,13 @@ async def test_talk_gate() -> None:
         assert len(prompts) == 1
         [logged] = work.store.talk_log()
         features = json.loads(logged["features"])
-        assert logged["outcome"] == "PASS" and logged["p"] == 1.0 and features["work"] is True
+        assert logged["outcome"] == "PASS" and features["work"] is True
+        assert 0 < logged["p"] < 1.0 and main_module.WORK_MOOD not in prompts[0]
+        missed_source = FakeSource("门店资料：周一休息")
+        missed, prompts = worker("missed", missed_source)
+        missed._proactive_chat.record(GROUP_ID, "乙", "什么时候营业？", time.monotonic(), sender_id="2", pending=True)
+        await missed._judge_chatter(event, GROUP_ID)
+        assert prompts == [] and [r["outcome"] for r in missed.store.talk_log()] == ["skip"]
 
         # No question, no consultation; a question with nothing for it rolls like any other.
         systems.clear()
