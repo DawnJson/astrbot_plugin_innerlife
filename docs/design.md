@@ -234,7 +234,7 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 - **她自己画图**：标记里 `draw` 带画面描述，回复发出后框架调用 `ToolGate.invoke(context, event, draw_tool_name, {"prompt", **draw_tool_arguments})`。屏蔽词（内置词表加 `draw.draw_blocked_terms`）和每日次数（`tool_usage` 表）都在 `ToolGate` 里检查，不通过就什么都不调用。它直接返回图片路径列表，`main.py` 发送后删除文件；失败只记日志、不发图。生图服务由部署者在 AstrBot 里配成 MCP 服务。
 - **取图的方式**：不依赖某个服务的返回格式。结果里有 MCP 标准图片内容（`ImageContent`）就解码写进插件数据目录的 `images/`；没有的话，从返回文字里找图片文件的绝对路径，只收落在 `images/` 内且文件存在的（`..` 绕出目录的、目录外的、不存在的都忽略）。
-- **搜索**：框架只给提示词规则（部署方资料和实时数据优先，冲突时两边都说、以部署方为准，链接过白名单）；原生搜索由部署者在模型提供商里打开。开启 `basic.search_rules` 时安全底线里"不得声称自己能联网"一句不出现（按条件拼接，不做字符串替换）。
+- **搜索**：框架只给提示词规则（部署方资料和实时数据优先，冲突时两边都说、以部署方为准；链接白名单已在安全底线里，不重复），只加在 @ 回答里：后台调用（插话判断、主动话题等）应走不带搜索的 `basic.background_provider_id`，带上规则只是白占 token。原生搜索由部署者在模型提供商里打开。开启 `basic.search_rules` 时安全底线里"不得声称自己能联网"一句不出现（按条件拼接，不做字符串替换）。
 - **识图**：闲聊判断带上被判断那几条消息里最新的 `basic.max_images` 张图（受单张 8 MB 和总共 16 MB 限制）。@ 回答除了这条消息自己的图，还带上同一个人在 @ 之前 30 秒内单独发的图（`EARLIER_IMAGE_SECONDS`，取最新的，总数不超过 `basic.max_images`，同样受大小限制，排在这条消息自己的图前面），因为群友常常先发图再单独 @ 她。需要 `basic.vision`。AstrBot 会把每条消息的图下载成临时文件，这条消息处理完就删掉，所以框架在记群聊时把每条消息最多 `basic.max_images` 张图的内容留在内存群聊里；要给模型看时写到插件数据目录的 `chat_images/`，判断结束或 @ 回答结束后删除，插件启动时清掉残留。
 
 AstrBot 的 `OnUsingLLMToolEvent` 钩子**拦不住**工具调用（`tool_loop_agent_runner.py` 在钩子之后无条件执行工具，钩子的异常也被吞掉），所以框架干脆不让模型拿到工具。

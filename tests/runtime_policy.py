@@ -691,7 +691,7 @@ async def test_decorated_result_at_rule() -> None:
 
 async def test_chatter_judgement() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        instance = stateful(directory + "/main", roll=0.0)
+        instance = stateful(directory + "/main", roll=0.0, search_rules=True)
         prompts: list[tuple[str, str]] = []
         answers: list[str | None] = []
 
@@ -722,6 +722,8 @@ async def test_chatter_judgement() -> None:
         system_prompt, prompt = prompts[-1]
         assert system_prompt.startswith(instance.safety_prompt + "\n\n测试人设\n\n")
         assert "只输出下面两种之一" in system_prompt
+        # The background model answers without searching: no search rules, only on @ answers.
+        assert "【联网搜索】" not in system_prompt
         assert prompt.startswith("你此刻的状态：") and "群友也会叫你：小测\n" in prompt
         assert prompt.endswith("1. 0分钟前 甲：今天好热")
 
