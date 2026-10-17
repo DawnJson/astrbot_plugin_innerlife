@@ -13,7 +13,7 @@ from .store import Store
 
 PROMPT_STICKERS = 40
 PROMPT_MOST_USED = 20  # the rest of the list is random, so what she picks varies
-STICKER_SIDE = 240  # longest side of a kept sticker; QQ shows an image at its own size
+STICKER_SIDE = 180  # longest side of a kept sticker; QQ shows an image at its own size
 
 
 def shrink(data: bytes) -> bytes:
