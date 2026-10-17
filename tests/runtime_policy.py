@@ -1804,6 +1804,9 @@ async def test_talk_gate() -> None:
         row = talker.store.talk(GROUP_ID)
         assert abs(row["her"] - 1.0) < 0.01 and abs(row["total"] - 2.0) < 0.01
         assert abs(row["heat"] - talker.s.talk_contagion) < 0.01
+        talker.note_bot_message(GROUP_ID, "【渠道恢复】正常")
+        row = talker.store.talk(GROUP_ID)
+        assert abs(row["her"] - 1.0) < 0.01 and abs(row["total"] - 3.0) < 0.01
     print("PASS policy: the gate rolls before any model call; busy and fuse leave or resolve batches; state follows the chat")
 
 
