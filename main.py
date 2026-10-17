@@ -102,6 +102,7 @@ JOB_TIMEOUT_SECONDS = 300.0
 MAX_INPUT_CHARS = 4000
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024
+EARLIER_IMAGE_SECONDS = 30  # images the asker sent this long before an @ come along with it
 IGNORED_MINUTES = 15  # her unprompted line gets no answer for this long: she feels let down
 JAB_COOLDOWN_SECONDS = 600
 SWITCH_SAVE_FAILED_MESSAGE = "机器人回复设置保存失败，请稍后重试"
@@ -1193,6 +1194,33 @@ class Main(star.Star):
             return False
         return sum(size or 0 for size in sizes) <= MAX_TOTAL_IMAGE_BYTES
 
+    async def _earlier_images(self, event: AstrMessageEvent, image_refs: list[str]) -> list[str]:
+        """Local paths of images the asker sent in separate messages just before the @, newest
+        kept, so the request stays within the count and size limits."""
+        entry = event.get_extra(_CHAT_ENTRY_KEY)
+        room = self.s.max_images - len(image_refs)
+        if entry is None or room <= 0:
+            return []
+        images = self._proactive_chat.images_before(
+            str(event.get_group_id()), entry, EARLIER_IMAGE_SECONDS
+        )[-room:]
+        total = sum(self._image_size(ref) or 0 for ref in image_refs)
+        paths: list[str] = []
+        for image in images:
+            try:
+                path = await image.convert_to_file_path()
+            except Exception as exc:
+                logger.warning("Chat image unavailable: %s", type(exc).__name__)
+                continue
+            if str(image.url or image.file or "").startswith(("http://", "https://")):
+                event.track_temporary_local_file(path)
+            size = self._image_size(path)
+            if size is None or size > MAX_IMAGE_BYTES or total + size > MAX_TOTAL_IMAGE_BYTES:
+                continue
+            total += size
+            paths.append(path)
+        return paths
+
     async def _slot_watchdog(self, event: AstrMessageEvent) -> None:
         try:
             await asyncio.sleep(180)
@@ -1241,6 +1269,7 @@ class Main(star.Star):
             await event.send(MessageChain().message(self._image_limit_message()))
             event.stop_event()
             return
+        request.image_urls[:0] = await self._earlier_images(event, request.image_urls)
 
         # She follows the group through the shared chat in her prompt
         # (apply_persona), not through AstrBot's per-member conversation.

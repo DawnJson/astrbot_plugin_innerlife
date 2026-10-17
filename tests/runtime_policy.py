@@ -1292,6 +1292,54 @@ async def test_stickers_are_kept_and_sent() -> None:
     print("PASS policy: stickers are kept from shown images and sent after her text or alone")
 
 
+async def test_at_brings_the_askers_earlier_images() -> None:
+    class FakeImage:
+        url = ""
+
+        def __init__(self, path: str) -> None:
+            self.file = path
+
+        async def convert_to_file_path(self) -> str:
+            return self.file
+
+    with tempfile.TemporaryDirectory() as directory:
+        def image(name: str) -> FakeImage:
+            path = Path(directory) / name
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
+            return FakeImage(str(path))
+
+        instance = make_main(max_images=2)
+        chat = instance._proactive_chat
+        now = time.monotonic()
+        old, theirs, a, b, c = (image(f"{n}.png") for n in ("old", "theirs", "a", "b", "c"))
+        chat.record(GROUP_ID, "甲", "[图片]", now - 31, sender_id="u1", pending=False, images=[old])
+        chat.record(GROUP_ID, "乙", "[图片]", now - 5, sender_id="u2", pending=False, images=[theirs])
+        chat.record(GROUP_ID, "甲", "[图片][图片]", now - 20, sender_id="u1", pending=False, images=[a, b])
+        chat.record(GROUP_ID, "甲", "[图片]", now - 10, sender_id="u1", pending=False, images=[c])
+        asked = chat.record(GROUP_ID, "甲", "@你 这是啥", now, sender_id="u1", pending=False)
+
+        # Only the asker's images from the last 30 seconds, the newest that fit, oldest first.
+        event = FakeEvent("这是啥", sender_id="u1")
+        event.set_extra(_CHAT_ENTRY_KEY, asked)
+        request = ProviderRequest(prompt="这是啥")
+        await instance.secure_model_request(event, request)
+        assert request.image_urls == [b.file, c.file]
+
+        # Images in the @ message itself come first in the count; a full request takes none.
+        own = ProviderRequest(prompt="这是啥", image_urls=[a.file])
+        await instance.secure_model_request(event, own)
+        assert own.image_urls == [c.file, a.file]
+        full = ProviderRequest(prompt="这是啥", image_urls=[a.file, b.file])
+        await instance.secure_model_request(event, full)
+        assert full.image_urls == [a.file, b.file]
+
+        # Without the recorded @ line nothing is added.
+        bare = ProviderRequest(prompt="这是啥")
+        await instance.secure_model_request(FakeEvent("这是啥", sender_id="u1"), bare)
+        assert bare.image_urls == []
+    print("PASS policy: an @ brings the asker's images from the 30 seconds before it")
+
+
 async def test_insult_signal_and_bot_notes() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory)
@@ -1803,6 +1851,7 @@ async def main() -> None:
     await test_drawing_through_the_real_gate()
     await test_judge_sees_images_and_bursts()
     await test_stickers_are_kept_and_sent()
+    await test_at_brings_the_askers_earlier_images()
     await test_insult_signal_and_bot_notes()
     await test_topic_starter()
     await test_topics_wait_while_she_sleeps()

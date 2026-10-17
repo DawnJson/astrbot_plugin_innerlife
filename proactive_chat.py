@@ -170,6 +170,18 @@ class ProactiveChat:
             None,
         )
 
+    def images_before(self, group_id: str, entry: ChatMessage, seconds: float) -> list:
+        """Images the same member sent in their own messages within `seconds` before entry, oldest first."""
+        messages = list(self._state(group_id).messages)
+        if entry not in messages:
+            return []
+        return [
+            image
+            for m in messages[: messages.index(entry)]
+            if m.sender_id == entry.sender_id and entry.at - m.at <= seconds
+            for image in m.images
+        ]
+
     def member_chars(self, group_id: str, now: float) -> float | None:
         """Median length of the members' recent lines, or None with fewer than 3 to go by."""
         lengths = [
