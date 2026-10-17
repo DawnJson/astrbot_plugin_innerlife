@@ -95,7 +95,8 @@ if innerlife is not None and innerlife.star_cls is not None:
 4. 工作资料：一节「工作资料（由插件提供，含使用规范）」，只有有来源返回文字时才有。
 5. innerlife 当前状态：心情、在场的人的印象和记忆、今天的日程天气、最近的日记
 6. 群里最近的聊天：内存里这个群最近 15 条（带多久以前，她自己的话标成「你」，找她的这条也在里面），附一句别和自己刚说过的话用同样的开头和口头禅
-7. 标记规则、连发规则、搜索规则
+7. 你此刻的状态（兴致那一句，答工作问题时是"在上班"）和【这次说多长】（答工作问题时没有），见"说多长"
+8. 标记规则、连发规则、搜索规则
 
 @ 回答不带 AstrBot 的对话历史：AstrBot 按群友各存一份对话（`unique_session`），框架把 `contexts` 清空、`conversation` 置空（也就不再写回）。她对群里的上下文只来自第 6 节，和没 @ 的插话判断读的是同一份群聊缓存。
 
@@ -181,7 +182,15 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 ### 决策日志
 
-`talk_log(at, group_id, kind, p, outcome, features)`：每次判断和每次命中的主动话题记一行，用来调参。`kind` 是 `chat` / `topic`；`outcome` 是 `skip`（没掷中）/ `PASS` / `CHAT`（说了一句话或只发了表情包）/ `fuse` / `busy` / `fail`（模型调用失败）/ `sent`（话题发出）；`features` 是 JSON，含 `z`、各特征、`bias`、`share_now`、`heat`、`urge`、`energy`。夜间清理只留 14 天。主动话题每分钟没掷中的不记，否则每群每天 1440 行。
+`talk_log(at, group_id, kind, p, outcome, features)`：每次判断、每次命中的主动话题和每次随口的 @ 回答记一行，用来调参。`kind` 是 `chat` / `topic` / `at`；`outcome` 是 `skip`（没掷中）/ `PASS` / `CHAT`（说了一句话或只发了表情包）/ `fuse` / `busy` / `fail`（模型调用失败）/ `sent`（话题发出）；`features` 是 JSON，含 `z`、各特征、`bias`、`share_now`、`heat`、`urge`、`energy`，以及这次的长度建议 `budget` 和实际发出的总字数 `chars`。夜间清理只留 14 天。主动话题每分钟没掷中的不记，否则每群每天 1440 行。
+
+### 说多长
+
+@ 回答、没 @ 的插话和主动话题，只要不是在答工作问题，提示词里都有同一句【这次说多长】：这次随口回大概 N 个字、说完就停、口头禅一次最多一个。每次现算：
+
+`N = clamp(m · talk.verbosity · (0.5 + 0.5·energy/100) · (0.8 + 0.6·arousal) · ε, 6, 80)`，`ln ε ~ N(0, 0.4²)`
+
+`m` 是内存群聊里 15 分钟内群友（不含她）一句话的中位字数，不到 3 句时按 10。它是提示不是上限：@ 回答不截断；没 @ 的插话沿用原有的保护（超过 100 字或多于两行按 PASS）。@ 回答同时带上和插话判断一样的"你此刻的状态"（兴致那一句；答工作问题时是"在上班"）。
 
 ### 旋钮（`talk` 分组）
 
@@ -192,6 +201,7 @@ if innerlife is not None and innerlife.star_cls is not None:
 | `stamina_minutes` | 45 | 兴致从低处恢复的时间常数（分钟） |
 | `urge_hours` | 4 | 群冷着时想开新话题的冲动攒到约 63% 的时间（小时），3 倍时间约 95% |
 | `contagion` | 0.5 | 聊开了以后接着说的倾向：她每说一行热度加这么多 |
+| `verbosity` | 1.5 | 她随口一句大约是群友一句的几倍长，见"说多长" |
 
 ## 记忆（`memory.py` `jobs.py`）
 

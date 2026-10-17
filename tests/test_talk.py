@@ -121,5 +121,18 @@ class EnergyUrgeTests(unittest.TestCase):
         self.assertGreater(talk.topic_probability(0.5, 0.0), 0.0)
 
 
+class BudgetTests(unittest.TestCase):
+    def test_budget_follows_the_group_and_her_state(self) -> None:
+        # Group says 8 chars a line, verbosity 1.5, full energy, calm: 8 * 1.5 * 1.0 * 0.98.
+        self.assertEqual(talk.reply_budget(8.0, 1.5, 100.0, 0.3, 1.0), 12)
+        self.assertLess(talk.reply_budget(8.0, 1.5, 10.0, 0.3, 1.0), 12)
+        self.assertGreater(talk.reply_budget(8.0, 1.5, 100.0, 0.9, 1.0), 12)
+        self.assertEqual(talk.reply_budget(None, 1.0, 100.0, 1 / 3, 1.0), 10)
+
+    def test_budget_stays_in_range(self) -> None:
+        self.assertEqual(talk.reply_budget(1.0, 0.5, 0.0, 0.0, 0.3), talk.BUDGET_RANGE[0])
+        self.assertEqual(talk.reply_budget(200.0, 3.0, 100.0, 1.0, 3.0), talk.BUDGET_RANGE[1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -91,6 +91,7 @@ class Settings:
     talk_stamina_minutes: float
     talk_urge_hours: float
     talk_contagion: float
+    talk_verbosity: float
 
     # drawing
     draw: bool
@@ -126,7 +127,7 @@ class Settings:
         if not persona_id:
             raise ValueError("astrbot_persona_id must not be empty")
         timezone = str(basic["timezone"]).strip()
-        for key in ("temperature", "stamina_minutes", "urge_hours"):
+        for key in ("temperature", "stamina_minutes", "urge_hours", "verbosity"):
             if float(talk[key]) <= 0:
                 raise ValueError(f"talk.{key} must be above 0")
         return cls(
@@ -190,6 +191,7 @@ class Settings:
             talk_stamina_minutes=float(talk["stamina_minutes"]),
             talk_urge_hours=float(talk["urge_hours"]),
             talk_contagion=float(talk["contagion"]),
+            talk_verbosity=float(talk["verbosity"]),
             draw=bool(draw["enabled"]),
             draw_tool_name=str(draw["draw_tool_name"]).strip(),
             # AstrBot's schema has no free-form dict type: this is JSON text.

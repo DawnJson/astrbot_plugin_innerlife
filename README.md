@@ -36,7 +36,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 
 ## 配置
 
-64 个配置项，在 WebUI 里分成 10 组（`_conf_schema.json`），默认值只在这个文件里写一份：
+65 个配置项，在 WebUI 里分成 10 组（`_conf_schema.json`），默认值只在这个文件里写一份：
 
 | 组 | 内容 |
 |---|---|
@@ -46,7 +46,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 | `memory` 记忆与日记 | 记忆开关和半衰期、「忘掉我」命令、按天删除、整理时间、日记开关和保留天数 |
 | `life` 生活 | 日程、天气、新闻开关，新闻源和屏蔽词，节假日数据，城市和经纬度 |
 | `proactive` 主动 | 主动开话题的开关、群里安静多久才考虑开话题 |
-| `talk` 说话量 | 她占群里发言的目标比例、随机程度、兴致恢复快慢、想开新话题的冲动攒多快、聊开后接着说的倾向 |
+| `talk` 说话量 | 她占群里发言的目标比例、随机程度、兴致恢复快慢、想开新话题的冲动攒多快、聊开后接着说的倾向、随口一句比群友长几倍 |
 | `draw` 画图 | 开关、工具名、固定参数、每日张数、屏蔽词 |
 | `burst` 连发 | 开关 |
 | `sticker` 表情包 | 开关、最多收藏几张、单张大小上限 |

@@ -919,6 +919,9 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
             assert wanted in prompt, wanted
         assert "刚分手" not in prompt
         assert event.get_extra(main_module._BURST_CAP_KEY) == 3
+        # A casual @ answer gets the same state line and length hint as unmentioned chat.
+        assert "你此刻的状态：兴致不错" in prompt and "【这次说多长】" in prompt
+        assert 6 <= event.get_extra(main_module._BUDGET_KEY) <= 80
         instance._release_slot(event)
 
         instance._proactive_chat.energy = 5.0
@@ -938,6 +941,9 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
         await run_request(instance, support_event, support_request)
         assert support_event.get_extra(main_module._BURST_CAP_KEY) == 0
         assert "<sp>" not in support_request.system_prompt
+        assert "【这次说多长】" not in support_request.system_prompt
+        assert "你此刻的状态：在上班" in support_request.system_prompt
+        assert support_event.get_extra(main_module._BUDGET_KEY) is None
         instance._release_slot(support_event)
 
         plain = stateful(

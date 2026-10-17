@@ -32,6 +32,10 @@ TOPIC_RATE = 0.0127  # per minute at full urge and full energy
 TOPIC_SENT_URGE = 0.3
 TOPIC_MISS_URGE = 0.6
 
+BUDGET_RANGE = (6, 80)  # chars of one casual reply
+BUDGET_GROUP_CHARS = 10.0  # assumed member line length while the chat is too thin to measure
+BUDGET_SIGMA = 0.4  # spread of the log-normal noise main.py draws
+
 
 @dataclass
 class TalkState:
@@ -114,6 +118,16 @@ def probability(z: float, temperature: float) -> float:
 
 def topic_probability(urge: float, energy: float) -> float:
     return TOPIC_RATE * urge * urge * breadth(energy)
+
+
+def reply_budget(
+    group_chars: float | None, verbosity: float, energy: float, arousal: float, noise: float
+) -> int:
+    """About how many characters her next casual reply runs to: the group's usual line length
+    times `verbosity`, shorter when she is tired, longer when worked up; `noise` is about 1."""
+    base = BUDGET_GROUP_CHARS if group_chars is None else group_chars
+    n = base * verbosity * (0.5 + 0.5 * energy / 100.0) * (0.8 + 0.6 * arousal) * noise
+    return max(BUDGET_RANGE[0], min(BUDGET_RANGE[1], round(n)))
 
 
 _QUESTION_RE = re.compile(
