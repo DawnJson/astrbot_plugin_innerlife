@@ -78,11 +78,6 @@
         "default": 4,
         "hint": "@ 她的提问优先；后台的插话判断和主动话题在并发满时直接让路。"
       },
-      "history_ttl_seconds": {
-        "description": "无互动后上下文过期秒数",
-        "type": "int",
-        "default": 600
-      },
       "max_images": {
         "description": "单次最多分析的图片数",
         "type": "int",

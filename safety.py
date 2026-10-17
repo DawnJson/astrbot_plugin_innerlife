@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -163,81 +162,3 @@ def finalize_reply(
     return sanitize_output_links(
         normalize_reply_style(redact_sensitive_text(cleaned, secrets)), domains
     )
-
-def context_text_length(context: dict) -> int:
-    content = context.get("content", "")
-    if isinstance(content, str):
-        return len(content)
-    if not isinstance(content, list):
-        return 0
-    total = 0
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            total += len(str(item.get("text", "")))
-    return total
-
-
-def sanitize_context_history(
-    contexts: list[dict],
-    *,
-    secrets: Iterable[str] = (),
-    max_turns: int = 6,
-    max_chars: int = 8000,
-) -> list[dict]:
-    """Return a text-only, redacted tail of user/assistant conversation history."""
-    cleaned: list[dict] = []
-    for original in contexts:
-        if not isinstance(original, dict):
-            continue
-        role = original.get("role")
-        if role not in {"user", "assistant"}:
-            continue
-
-        context = copy.deepcopy(original)
-        context.pop("tool_calls", None)
-        context.pop("tool_call_id", None)
-        content = context.get("content", "")
-        if isinstance(content, str):
-            context["content"] = redact_sensitive_text(content, secrets)
-        elif isinstance(content, list):
-            text_parts: list[dict[str, str]] = []
-            image_count = 0
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                item_type = str(item.get("type", "")).lower()
-                if item_type == "text":
-                    text_parts.append(
-                        {
-                            "type": "text",
-                            "text": redact_sensitive_text(
-                                str(item.get("text", "")), secrets
-                            ),
-                        }
-                    )
-                elif item_type in {"image", "image_url"}:
-                    image_count += 1
-            if image_count:
-                text_parts.append(
-                    {"type": "text", "text": f"[历史消息包含 {image_count} 张图片]"}
-                )
-            context["content"] = text_parts
-        else:
-            continue
-        cleaned.append(context)
-
-    if max_turns <= 0 or max_chars <= 0:
-        return []
-
-    cleaned = cleaned[-max_turns * 2 :]
-    while cleaned and cleaned[0].get("role") != "user":
-        cleaned.pop(0)
-
-    total_chars = sum(context_text_length(item) for item in cleaned)
-    while cleaned and total_chars > max_chars:
-        removed = cleaned.pop(0)
-        total_chars -= context_text_length(removed)
-        while cleaned and cleaned[0].get("role") != "user":
-            removed = cleaned.pop(0)
-            total_chars -= context_text_length(removed)
-    return cleaned

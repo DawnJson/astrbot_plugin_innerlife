@@ -38,7 +38,6 @@ class Settings:
     switch_command: str
     cooldown_seconds: float
     max_concurrency: int
-    history_ttl_seconds: int
     max_images: int
     background_provider_id: str
     daily_call_fuse: int
@@ -143,7 +142,6 @@ class Settings:
             switch_command=switch_command,
             cooldown_seconds=float(basic["cooldown_seconds"]),
             max_concurrency=int(basic["max_concurrency"]),
-            history_ttl_seconds=int(basic["history_ttl_seconds"]),
             max_images=int(basic["max_images"]),
             background_provider_id=str(basic["background_provider_id"]).strip(),
             daily_call_fuse=int(basic["daily_call_fuse"]),

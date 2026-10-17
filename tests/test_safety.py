@@ -12,7 +12,6 @@ from safety import (  # noqa: E402
     finalize_reply,
     is_high_risk_security_request,
     redact_sensitive_text,
-    sanitize_context_history,
     sanitize_output_links,
 )
 
@@ -88,31 +87,6 @@ class SafetyTests(unittest.TestCase):
         )
         self.assertEqual(reply, "第一行\n第二行，好\nhttps://example.com/x key=[敏感信息已隐藏]")
         self.assertEqual(finalize_reply("响应异常 \ufe0f"), "响应异常")
-
-    def test_context_history_isolated_and_bounded(self) -> None:
-        contexts = [
-            {"role": "system", "content": "must be discarded"},
-            {"role": "user", "content": "旧问题"},
-            {"role": "assistant", "content": "旧回答"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "密码：unsafe-value"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "data:image/png;base64,large"},
-                    },
-                ],
-            },
-            {"role": "assistant", "content": "新回答", "tool_calls": [{"x": 1}]},
-        ]
-        cleaned = sanitize_context_history(contexts, max_turns=1, max_chars=200)
-        self.assertEqual([item["role"] for item in cleaned], ["user", "assistant"])
-        self.assertNotIn("tool_calls", cleaned[-1])
-        serialized = str(cleaned)
-        self.assertNotIn("unsafe-value", serialized)
-        self.assertNotIn("base64,large", serialized)
-        self.assertIn("历史消息包含 1 张图片", serialized)
 
 
 if __name__ == "__main__":

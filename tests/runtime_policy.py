@@ -46,21 +46,6 @@ SECRET = "plain-test-secret-value"
 os.environ[SECRET_ENV] = SECRET
 
 
-class FakeConversationManager:
-    def __init__(self, updated_at: float) -> None:
-        self.updated_at = updated_at
-        self.deleted: list[tuple[str, str]] = []
-
-    async def get_curr_conversation_id(self, _: str) -> str:
-        return "runtime-policy-conversation"
-
-    async def get_conversation(self, _: str, __: str) -> SimpleNamespace:
-        return SimpleNamespace(updated_at=self.updated_at)
-
-    async def delete_conversation(self, umo: str, conversation_id: str) -> None:
-        self.deleted.append((umo, conversation_id))
-
-
 class FakePersonaManager:
     def __init__(self, existing: bool) -> None:
         self.existing = existing
@@ -408,17 +393,6 @@ def test_safety_prompt_link_rule_and_no_business_words() -> None:
     print("PASS policy: link rule follows allowed_link_domains; the framework prompts carry no deployment business")
 
 
-async def test_expiry() -> None:
-    instance = make_main(history_ttl_seconds=600)
-    manager = FakeConversationManager(time.time() - 601)
-    instance.context = SimpleNamespace(conversation_manager=manager)
-    event = FakeEvent()
-
-    await instance._expire_context_if_needed(event)
-    assert manager.deleted == [(event.unified_msg_origin, "runtime-policy-conversation")]
-    print("PASS policy: context expires after 600 seconds of inactivity")
-
-
 async def test_cooldown() -> None:
     instance = make_main()
     assert await instance._check_cooldown("user-a") == 0
@@ -430,11 +404,6 @@ async def test_cooldown() -> None:
 async def test_waiting_guard() -> None:
     os.environ[SECRET_ENV] = SECRET
     instance = make_main(cooldown_seconds=0)
-
-    async def no_expiry(_event) -> None:
-        return None
-
-    instance._expire_context_if_needed = no_expiry
 
     # Only an explicit @ may reach the model.
     quoted_bot = main_module.Reply(id="1", sender_id=BOT_ID, chain=[])
@@ -525,7 +494,7 @@ async def test_request_policy_at_300_and_0() -> None:
     assert not event.stopped
     assert request.system_prompt == instance.safety_prompt
     assert SECRET not in request.prompt
-    assert SECRET not in str(request.contexts)
+    assert request.contexts == [] and request.conversation is None
     assert [p.text.split("\n")[0] for p in request.extra_user_content_parts] == [
         "[Related Knowledge Base Results]:",
         "<Quoted Message>",
@@ -536,11 +505,18 @@ async def test_request_policy_at_300_and_0() -> None:
     request.extra_user_content_parts.append(
         TextPart(text=f"功能插件数据 password={SECRET}")
     )
+    # She sees the whole group's recent chat, her own lines included, not one member's history.
+    instance._proactive_chat.record(
+        GROUP_ID, "甲", "我的分组叫海棠", time.monotonic(), sender_id="u1", pending=False
+    )
+    instance._proactive_chat.record_reply(GROUP_ID, "哈？关我什么事", time.monotonic(), spend=False)
     await instance.apply_persona(event, request)
     assert request.system_prompt.startswith(
         instance.safety_prompt + "\n\n【功能插件】提示词\n\n测试人设\n\n"
     )
     assert "<il>" in request.system_prompt and "【联网搜索】" in request.system_prompt
+    assert "甲：我的分组叫海棠" in request.system_prompt
+    assert "你：哈？关我什么事" in request.system_prompt
     assert len(request.extra_user_content_parts) == 3
     assert SECRET not in str(
         [part.text for part in request.extra_user_content_parts]
@@ -766,17 +742,12 @@ async def test_chatter_judgement() -> None:
 async def test_work_material_in_the_at_path() -> None:
     """Every plugin with `innerlife_reference` adds one section to her prompt; she is always the voice."""
     with tempfile.TemporaryDirectory() as directory:
-
-        async def no_expiry(_event) -> None:
-            return None
-
         def asking(**kwargs) -> FakeEvent:
             return FakeEvent("这个怎么配置", **kwargs)
 
         instance = stateful(
             directory + "/main", roll=1.0, cooldown_seconds=0, work_background="你在这里做客服"
         )
-        instance._expire_context_if_needed = no_expiry
 
         # An unmentioned message never reaches the model, whatever plugins may think.
         plain = FakeEvent("这个怎么配置", messages=[main_module.Plain("这个怎么配置")])
@@ -923,15 +894,6 @@ async def test_garbled_markers_never_leak() -> None:
         event.set_result(model_result("好的 <il>{bad"))
         await instance.secure_decorated_result(event)
         assert plain_texts(event.get_result()) == ["好的"]
-        contexts = ProviderRequest(
-            prompt="再问",
-            contexts=[
-                {"role": "user", "content": "问"},
-                {"role": "assistant", "content": "好的\n<il>{}</il>"},
-            ],
-        )
-        await instance.secure_model_request(FakeEvent("再问"), contexts)
-        assert contexts.contexts[1]["content"] == "好的"
     print("PASS policy: missing or garbled markers never leak and never break the reply")
 
 
@@ -1817,7 +1779,6 @@ async def main() -> None:
     await test_forget_me()
     await test_persona_is_created_or_updated()
     test_safety_prompt_link_rule_and_no_business_words()
-    await test_expiry()
     await test_cooldown()
     await test_waiting_guard()
     test_quoted_text_is_part_of_the_request_text()

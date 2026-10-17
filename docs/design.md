@@ -27,7 +27,7 @@ innerlife 是 **群聊机器人拟人化框架**：只管"她是谁、她怎么�
 | `tools.py` | `ToolGate`：只服务她自己画图（屏蔽词、每日次数、取图） |
 | `burst.py` `safety.py` `reply_switch.py` | 连发规划；脱敏、链接白名单、高危识别；开关命令的解析和群管身份判断 |
 
-框架里的数字分两类：部署者会想调的在 `_conf_schema.json`（经 `Settings` 读取），其余是各模块顶部的命名常量（如 `main.py` 的 `HISTORY_MAX_TURNS`、`jobs.py` 的 `SLEEP_HOURS`、`emotion.py` 的 `AFFINITY_STEP`）。
+框架里的数字分两类：部署者会想调的在 `_conf_schema.json`（经 `Settings` 读取），其余是各模块顶部的命名常量（如 `proactive_chat.py` 的 `PROMPT_MESSAGES`、`jobs.py` 的 `SLEEP_HOURS`、`emotion.py` 的 `AFFINITY_STEP`）。
 
 ## 框架和功能插件怎么配合
 
@@ -93,7 +93,11 @@ if innerlife is not None and innerlife.star_cls is not None:
 2. innerlife 人设（`basic.persona_prompt`）
 3. 她的工作（`basic.work_background`，留空则没有这一节）：一节「你的工作」，职业身份和边界写在这里，不依赖任何功能插件。
 4. 工作资料：一节「工作资料（由插件提供，含使用规范）」，只有有来源返回文字时才有。
-5. innerlife 当前状态：心情、在场的人的印象和记忆、今天的日程天气、最近的日记，以及标记规则、连发规则、搜索规则
+5. innerlife 当前状态：心情、在场的人的印象和记忆、今天的日程天气、最近的日记
+6. 群里最近的聊天：内存里这个群最近 15 条（带多久以前，她自己的话标成「你」，找她的这条也在里面），附一句别和自己刚说过的话用同样的开头和口头禅
+7. 标记规则、连发规则、搜索规则
+
+@ 回答不带 AstrBot 的对话历史：AstrBot 按群友各存一份对话（`unique_session`），框架把 `contexts` 清空、`conversation` 置空（也就不再写回）。她对群里的上下文只来自第 6 节，和没 @ 的插话判断读的是同一份群聊缓存。
 
 功能插件不往提示词里追加任何东西；它们的业务规范跟着资料一起在第 4 节。
 
@@ -197,7 +201,7 @@ if innerlife is not None and innerlife.star_cls is not None:
 
 ### 隐私
 
-- `memory.forget_command`（默认 `/忘掉我`，留空关闭）：群友发这句话，删除关于他的印象、好感、记忆、以他为对象的情绪和未整理的聊天记录。已经写成的日记不改；内存里最近 15 分钟的群聊和 AstrBot 的对话上下文会自然过期。**只覆盖 innerlife 自己的数据**：AstrBot 里其他记忆插件存下的内容（例如按会话保存群聊原文的插件）不在其内，要靠那些插件自己的开关和保留期。
+- `memory.forget_command`（默认 `/忘掉我`，留空关闭）：群友发这句话，删除关于他的印象、好感、记忆、以他为对象的情绪和未整理的聊天记录。已经写成的日记不改；内存里最近的群聊（最多 30 条）会被新消息挤掉，重启即清空。**只覆盖 innerlife 自己的数据**：AstrBot 里其他记忆插件存下的内容（例如按会话保存群聊原文的插件）不在其内，要靠那些插件自己的开关和保留期。
 - `memory.person_keep_days`（默认 180，0 不启用）：超过这么多天没和她说过话的群友，夜间任务按同样的范围删除。
 - 聊天记录（`chat_log`）每晚整理完就清空；日记按 `memory.diary_keep_*_days` 删除；情绪 3 天后删除。
 
