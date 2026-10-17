@@ -80,7 +80,7 @@ class SafetyTests(unittest.TestCase):
         )
 
     def test_file_names_are_not_links(self) -> None:
-        text = "改 ~/.claude/settings.json 和 config.json，再看 package.json"
+        text = "改 ~/.config/app/settings.json 和 config.json，再看 package.json"
         self.assertEqual(sanitize_output_links(text, ("example.com",)), text)
         # A real TLD that looks like an extension, a scheme, or a host with a file path is a link.
         for link in ("evil.zip", "https://settings.json", "other.test/settings.json"):
