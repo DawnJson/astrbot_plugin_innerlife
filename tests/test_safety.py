@@ -79,6 +79,13 @@ class SafetyTests(unittest.TestCase):
             sanitize_output_links("https://example.com/a"), "链接已隐藏"
         )
 
+    def test_file_names_are_not_links(self) -> None:
+        text = "改 ~/.claude/settings.json 和 config.json，再看 package.json"
+        self.assertEqual(sanitize_output_links(text, ("example.com",)), text)
+        # A real TLD that looks like an extension, a scheme, or a host with a file path is a link.
+        for link in ("evil.zip", "https://settings.json", "other.test/settings.json"):
+            self.assertEqual(sanitize_output_links(f"看 {link}", ("example.com",)), "看 链接已隐藏")
+
     def test_finalize_reply_redacts_and_normalises_style(self) -> None:
         reply = finalize_reply(
             "第一行。\r\n第二行 ，好 ️\n\n https://example.com/x key=abcdefghijkl",

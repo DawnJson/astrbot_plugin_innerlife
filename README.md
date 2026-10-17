@@ -61,7 +61,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 | `basic.work_background` | 她的工作：身份和边界，留空表示没有；填了之后系统提示词里紧跟人设有一节「你的工作」 |
 | `basic.bot_names` | 群友对她的称呼，用来判断是不是在叫她 |
 | `basic.group_ids` | 生效的群号；空表示所有群 |
-| `basic.allowed_link_domains` | 回复里允许出现的 HTTPS 域名；空表示不发任何链接 |
+| `basic.allowed_link_domains` | 回复里允许出现的 HTTPS 域名；空表示不发任何链接。不带 `://` 的 `settings.json`、`config.yaml` 这类文件名（后缀不是真实顶级域名）不算链接 |
 | `life.city_name` / `life.latitude` / `life.longitude` / `basic.timezone` | 她"住"的城市和时区，用于天气和作息 |
 | `basic.background_provider_id` | 后台调用用的模型提供商；留空用聊天模型 |
 

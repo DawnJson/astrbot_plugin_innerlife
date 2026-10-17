@@ -14,6 +14,14 @@ _OUTPUT_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _MARKDOWN_LINK_RE = re.compile(r"\[([^]\r\n]+)\]\(([^)\s]+)\)")
+# File extensions that are not top-level domains: without a scheme, "settings.json" is a file
+# name, not a link. Extensions that are also real TLDs (.md .py .sh .zip .app ...) stay hidden.
+_FILE_SUFFIXES = frozenset({
+    "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "txt", "log", "lock",
+    "bat", "cmd", "ps1", "exe", "dll", "js", "mjs", "cjs", "ts", "tsx", "jsx", "vue", "html",
+    "htm", "css", "scss", "csv", "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "docx",
+    "xlsx", "pptx", "gz", "tar", "mp3", "mp4", "ipynb",
+})
 
 _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
@@ -140,6 +148,9 @@ def sanitize_output_links(text: str, domains: Iterable[str] = ()) -> str:
 
     def replace_url(match: re.Match[str]) -> str:
         candidate = match.group(0)
+        host = urlsplit(f"https://{candidate}").hostname or ""
+        if "://" not in candidate and host.rsplit(".", 1)[-1] in _FILE_SUFFIXES:
+            return candidate
         return candidate if _is_allowed_output_url(candidate, domains) else "链接已隐藏"
 
     def replace_markdown(match: re.Match[str]) -> str:

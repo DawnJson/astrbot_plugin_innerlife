@@ -10,6 +10,7 @@ import os
 import random
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,7 @@ from .safety import (
     redact_sensitive_text,
 )
 from .settings import Settings
-from .stickers import Stickers
+from .stickers import Stickers, image_ext
 from .store import Store
 from .talk import (
     BUDGET_SIGMA,
@@ -293,6 +294,11 @@ class Main(star.Star):
             self.stickers = Stickers(
                 self.store, data_dir / "stickers", s.sticker_max_count, s.sticker_max_bytes
             )
+        # The model reads chat images from files of her own: AstrBot deletes its temporary
+        # copy of a message's image once that message is handled. Left over files go at start.
+        self._chat_image_dir = data_dir / "chat_images"
+        self._chat_image_dir.mkdir(parents=True, exist_ok=True)
+        self._delete_files([str(path) for path in self._chat_image_dir.iterdir()])
         self._http = httpx.AsyncClient(timeout=20, follow_redirects=True)
         self.upkeep = Upkeep(
             self.store, self._job_call, s, self._http, lambda: self._now_dt()
@@ -916,9 +922,7 @@ class Main(star.Star):
             time.monotonic(),
             sender_id=sender_id,
             pending=enabled and not mentioned and self.s.daily_call_fuse > 0,
-            images=[c for c in event.get_messages() if isinstance(c, Image)]
-            if self.s.vision
-            else None,
+            images=await self._image_copies(event) if self.s.vision else None,
             reply_to_her=_event_replies_to_bot(event),
         )
         if self.store is not None:
@@ -938,26 +942,37 @@ class Main(star.Star):
         ):
             await self._judge_chatter(event, group_id)
 
-    async def _judge_images(self, entries) -> tuple[list[str], list[str]]:
-        """Local paths of the newest images among the judged lines within the size limits, and
-        the downloaded copies to delete afterwards."""
-        paths: list[str] = []
-        downloaded: list[str] = []
-        total = 0
-        for image in [image for entry in entries for image in entry.images][-self.s.max_images :]:
+    async def _image_copies(self, event: AstrMessageEvent) -> list[bytes]:
+        """The bytes of the message's first `basic.max_images` images within the single-image
+        limit, read now while AstrBot's temporary copies still exist."""
+        copies: list[bytes] = []
+        for component in event.get_messages():
+            if not isinstance(component, Image) or len(copies) >= self.s.max_images:
+                continue
             try:
-                path = await image.convert_to_file_path()
+                path = await component.convert_to_file_path()
             except Exception as exc:
                 logger.warning("Chat image unavailable: %s", type(exc).__name__)
                 continue
-            if str(image.url or image.file or "").startswith(("http://", "https://")):
-                downloaded.append(path)
             size = self._image_size(path)
-            if size is None or size > MAX_IMAGE_BYTES or total + size > MAX_TOTAL_IMAGE_BYTES:
-                continue
-            total += size
-            paths.append(path)
-        return paths, downloaded
+            if size is not None and size <= MAX_IMAGE_BYTES:
+                copies.append(Path(path).read_bytes())
+        return copies
+
+    def _image_files(self, images: list[bytes], used: int = 0) -> list[str]:
+        """Write the newest images that keep the total within the limit to files the caller
+        deletes; `used` is what the request already carries."""
+        kept: list[bytes] = []
+        for data in reversed(images):
+            if used + len(data) <= MAX_TOTAL_IMAGE_BYTES:
+                used += len(data)
+                kept.insert(0, data)
+        paths = []
+        for data in kept:
+            path = self._chat_image_dir / f"{uuid.uuid4().hex}.{image_ext(data) or 'jpg'}"
+            path.write_bytes(data)
+            paths.append(str(path))
+        return paths
 
     def _chat_gate(self, group_id: str, entries, work: bool) -> tuple[float, dict]:
         """The chance she speaks up on this batch, with the numbers behind it for the log."""
@@ -1001,7 +1016,7 @@ class Main(star.Star):
             entries = chat.begin_judgement(group_id, time.monotonic())
             if entries is None:
                 return
-            downloaded: list[str] = []
+            images: list[str] = []
             try:
                 if fused:
                     self._log_talk(group_id, "chat", "fuse", None, {})
@@ -1021,9 +1036,10 @@ class Main(star.Star):
                     else ""
                 )
                 speakers = chat.recent_speakers(group_id, mono)
-                images, downloaded = (
-                    await self._judge_images(entries) if self.s.vision else ([], [])
-                )
+                if self.s.vision:
+                    images = self._image_files(
+                        [image for entry in entries for image in entry.images][-self.s.max_images :]
+                    )
                 rules = self._rules(0 if material else self._burst_cap(), images=len(images), stickers=True)
                 length, budget = ("", None) if material else self._length_rule(group_id)
                 system = "\n\n".join(
@@ -1106,7 +1122,7 @@ class Main(star.Star):
                 if marker.draw and self.s.draw:
                     followups.append(self._draw_and_send(event, marker.draw, event.send))
             finally:
-                self._delete_files(downloaded)
+                self._delete_files(images)
                 chat.finish_judgement(entries)
         for followup in followups:
             await followup
@@ -1194,9 +1210,10 @@ class Main(star.Star):
             return False
         return sum(size or 0 for size in sizes) <= MAX_TOTAL_IMAGE_BYTES
 
-    async def _earlier_images(self, event: AstrMessageEvent, image_refs: list[str]) -> list[str]:
-        """Local paths of images the asker sent in separate messages just before the @, newest
-        kept, so the request stays within the count and size limits."""
+    def _earlier_images(self, event: AstrMessageEvent, image_refs: list[str]) -> list[str]:
+        """Files of the images the asker sent in separate messages just before the @, newest
+        kept so the request stays within the count and size limits; AstrBot deletes them when
+        the @ is handled."""
         entry = event.get_extra(_CHAT_ENTRY_KEY)
         room = self.s.max_images - len(image_refs)
         if entry is None or room <= 0:
@@ -1204,21 +1221,9 @@ class Main(star.Star):
         images = self._proactive_chat.images_before(
             str(event.get_group_id()), entry, EARLIER_IMAGE_SECONDS
         )[-room:]
-        total = sum(self._image_size(ref) or 0 for ref in image_refs)
-        paths: list[str] = []
-        for image in images:
-            try:
-                path = await image.convert_to_file_path()
-            except Exception as exc:
-                logger.warning("Chat image unavailable: %s", type(exc).__name__)
-                continue
-            if str(image.url or image.file or "").startswith(("http://", "https://")):
-                event.track_temporary_local_file(path)
-            size = self._image_size(path)
-            if size is None or size > MAX_IMAGE_BYTES or total + size > MAX_TOTAL_IMAGE_BYTES:
-                continue
-            total += size
-            paths.append(path)
+        paths = self._image_files(images, sum(self._image_size(ref) or 0 for ref in image_refs))
+        for path in paths:
+            event.track_temporary_local_file(path)
         return paths
 
     async def _slot_watchdog(self, event: AstrMessageEvent) -> None:
@@ -1269,7 +1274,7 @@ class Main(star.Star):
             await event.send(MessageChain().message(self._image_limit_message()))
             event.stop_event()
             return
-        request.image_urls[:0] = await self._earlier_images(event, request.image_urls)
+        request.image_urls[:0] = self._earlier_images(event, request.image_urls)
 
         # She follows the group through the shared chat in her prompt
         # (apply_persona), not through AstrBot's per-member conversation.

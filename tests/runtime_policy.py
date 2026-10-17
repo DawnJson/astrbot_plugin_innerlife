@@ -90,6 +90,7 @@ class FakeEvent:
         self.stopped = False
         self.result = None
         self.sent: list[object] = []
+        self.temporary: list[str] = []
         self.message_obj = SimpleNamespace(
             raw_message={"post_type": post_type, "sender": {"role": role}}
         )
@@ -108,6 +109,9 @@ class FakeEvent:
 
     def get_self_id(self) -> str:
         return BOT_ID
+
+    def track_temporary_local_file(self, path: str) -> None:
+        self.temporary.append(path)
 
     def get_message_str(self) -> str:
         return self.message_str
@@ -1116,27 +1120,17 @@ async def test_drawing_through_the_real_gate() -> None:
 
 async def test_judge_sees_images_and_bursts() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        paths = []
-        for index in range(3):
-            path = Path(directory) / f"chat{index}.png"
-            path.write_bytes(b"x" * 10)
-            paths.append(str(path))
-
-        class FakeImage:
-            url = ""
-
-            def __init__(self, path: str) -> None:
-                self.file = path
-
-            async def convert_to_file_path(self) -> str:
-                return self.file
-
+        datas = [b"\x89PNG\r\n\x1a\n" + bytes([index]) * 10 for index in range(3)]
         for vision in (True, False):
             instance = stateful(directory + f"/{vision}", roll=0.0, max_images=2, vision=vision)
             seen: dict = {}
 
             async def fake_call(system_prompt: str, prompt: str, image_urls=None):
-                seen.update(system=system_prompt, prompt=prompt, images=image_urls)
+                seen.update(
+                    system=system_prompt,
+                    prompt=prompt,
+                    images=[Path(path).read_bytes() for path in image_urls or []],
+                )
                 return (
                     '哈哈<sp>这图笑死我了\n<il>{"e":[{"k":"开心","i":0.7,"why":"表情包"}]}</il>'
                 )
@@ -1146,13 +1140,13 @@ async def test_judge_sees_images_and_bursts() -> None:
             instance._proactive_chat.energy = 90.0
             instance._proactive_chat.record(
                 group, "甲", "[图片]", time.monotonic(), sender_id="1", pending=True,
-                images=[FakeImage(path) for path in paths],
+                images=datas,
             )
             event = FakeEvent("x", messages=[])
             await instance._judge_chatter(event, group)
-            assert seen["images"] == (paths[1:] if vision else []) or (
-                not vision and not seen["images"]
-            ), seen["images"]
+            assert seen["images"] == (datas[1:] if vision else []), seen["images"]
+            # The files written for the model are gone once the judgement is over.
+            assert not any(instance._chat_image_dir.iterdir())
             assert ("最近 2 张图" in seen["prompt"]) == vision
             assert "<il>" in seen["system"]
             assert event.sent_text() == ["哈哈", "这图笑死我了"]
@@ -1163,15 +1157,6 @@ async def test_judge_sees_images_and_bursts() -> None:
 
 async def test_stickers_are_kept_and_sent() -> None:
     png = b"\x89PNG\r\n\x1a\n"
-
-    class FakeImage:
-        url = ""
-
-        def __init__(self, path: str) -> None:
-            self.file = path
-
-        async def convert_to_file_path(self) -> str:
-            return self.file
 
     def image_file(directory: str, name: str, tag: int) -> str:
         path = Path(directory) / name
@@ -1198,7 +1183,8 @@ async def test_stickers_are_kept_and_sent() -> None:
             group = str(next(groups))
             instance._proactive_chat.record(
                 group, "甲", "[图片]" if images else "好笑", time.monotonic(),
-                sender_id="1", pending=True, images=[FakeImage(path) for path in images or []],
+                sender_id="1", pending=True,
+                images=[Path(path).read_bytes() for path in images or []],
             )
             event = FakeEvent("x", messages=[])
             await instance._judge_chatter(event, group)
@@ -1293,45 +1279,46 @@ async def test_stickers_are_kept_and_sent() -> None:
 
 
 async def test_at_brings_the_askers_earlier_images() -> None:
-    class FakeImage:
-        url = ""
-
-        def __init__(self, path: str) -> None:
-            self.file = path
-
-        async def convert_to_file_path(self) -> str:
-            return self.file
-
     with tempfile.TemporaryDirectory() as directory:
-        def image(name: str) -> FakeImage:
-            path = Path(directory) / name
-            path.write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
-            return FakeImage(str(path))
+        instance = stateful(directory, max_images=2)
 
-        instance = make_main(max_images=2)
+        # The message's image is copied while AstrBot's temporary file exists; the copy
+        # outlives that file, which AstrBot deletes once the message is handled.
+        original = Path(directory) / "astrbot_temp.png"
+        original.write_bytes(b"\x89PNG\r\n\x1a\nc")
+        [c] = await instance._image_copies(
+            FakeEvent("x", messages=[main_module.Image(file=str(original))])
+        )
+        original.unlink()
+        old, theirs, a, b = (b"\x89PNG\r\n\x1a\n" + name for name in (b"old", b"theirs", b"a", b"b"))
         chat = instance._proactive_chat
         now = time.monotonic()
-        old, theirs, a, b, c = (image(f"{n}.png") for n in ("old", "theirs", "a", "b", "c"))
         chat.record(GROUP_ID, "甲", "[图片]", now - 31, sender_id="u1", pending=False, images=[old])
         chat.record(GROUP_ID, "乙", "[图片]", now - 5, sender_id="u2", pending=False, images=[theirs])
         chat.record(GROUP_ID, "甲", "[图片][图片]", now - 20, sender_id="u1", pending=False, images=[a, b])
         chat.record(GROUP_ID, "甲", "[图片]", now - 10, sender_id="u1", pending=False, images=[c])
         asked = chat.record(GROUP_ID, "甲", "@你 这是啥", now, sender_id="u1", pending=False)
 
-        # Only the asker's images from the last 30 seconds, the newest that fit, oldest first.
-        event = FakeEvent("这是啥", sender_id="u1")
-        event.set_extra(_CHAT_ENTRY_KEY, asked)
+        def asked_event() -> FakeEvent:
+            event = FakeEvent("这是啥", sender_id="u1")
+            event.set_extra(_CHAT_ENTRY_KEY, asked)
+            return event
+
+        # Only the asker's images from the last 30 seconds, the newest that fit, oldest first,
+        # in files AstrBot deletes when the @ is handled.
+        event = asked_event()
         request = ProviderRequest(prompt="这是啥")
         await instance.secure_model_request(event, request)
-        assert request.image_urls == [b.file, c.file]
+        assert [Path(path).read_bytes() for path in request.image_urls] == [b, c]
+        assert event.temporary == request.image_urls
 
         # Images in the @ message itself come first in the count; a full request takes none.
-        own = ProviderRequest(prompt="这是啥", image_urls=[a.file])
-        await instance.secure_model_request(event, own)
-        assert own.image_urls == [c.file, a.file]
-        full = ProviderRequest(prompt="这是啥", image_urls=[a.file, b.file])
-        await instance.secure_model_request(event, full)
-        assert full.image_urls == [a.file, b.file]
+        own = ProviderRequest(prompt="这是啥", image_urls=["base64://eA=="])
+        await instance.secure_model_request(asked_event(), own)
+        assert Path(own.image_urls[0]).read_bytes() == c and own.image_urls[1:] == ["base64://eA=="]
+        full = ProviderRequest(prompt="这是啥", image_urls=["base64://eA=="] * 2)
+        await instance.secure_model_request(asked_event(), full)
+        assert full.image_urls == ["base64://eA=="] * 2
 
         # Without the recorded @ line nothing is added.
         bare = ProviderRequest(prompt="这是啥")
