@@ -11,6 +11,7 @@ from astrbot_plugin_innerlife.proactive_chat import (  # noqa: E402
     MAX_WORK_REPLY_CHARS,
     MOODS,
     ProactiveChat,
+    overused_phrases,
     parse_reply,
 )
 
@@ -37,6 +38,13 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parse_reply(answer, work=True), answer)
         self.assertIsNone(parse_reply("PASS", work=True))
         self.assertIsNone(parse_reply("长" * (MAX_WORK_REPLY_CHARS + 1), work=True))
+
+    def test_overused_phrases_are_her_habits_not_one_offs(self) -> None:
+        lines = ["没完了是吧 哼", "又来 没完了是吧", "没完了是吧", "没完了是吧 烦", "今天下雨 123"]
+        self.assertEqual(overused_phrases(lines), ["没完了是吧"])
+        self.assertEqual(overused_phrases(lines[:3]), [])
+        sentence = ["好的 我知道了 你先忙吧"] * 4 + ["123", "123", "123", "123"]
+        self.assertEqual(overused_phrases(sentence), ["好的我知道了你先忙吧"])
 
 
 class JudgementTests(unittest.TestCase):

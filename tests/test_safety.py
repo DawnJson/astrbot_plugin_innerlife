@@ -94,6 +94,7 @@ class SafetyTests(unittest.TestCase):
         )
         self.assertEqual(reply, "第一行\n第二行，好\nhttps://example.com/x key=[敏感信息已隐藏]")
         self.assertEqual(finalize_reply("响应异常 \ufe0f"), "响应异常")
+        self.assertEqual(finalize_reply("改 `config.json` 里的 **base_url**"), "改 config.json 里的 base_url")
 
 
 if __name__ == "__main__":

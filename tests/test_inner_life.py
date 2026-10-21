@@ -446,6 +446,33 @@ class MindTests(unittest.TestCase):
             self.assertAlmostEqual(felt["无聊"], 0.4)
             self.assertAlmostEqual(felt["烦躁"], 0.8)
 
+    def test_a_run_of_the_same_feeling_is_one_feeling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "innerlife.db")
+            mind = Mind(store, make_settings())
+            mind.feel("烦躁", 0.5, "9", "刷屏", 0.0)
+            once = mind.mood(0.0)[0]
+            for minute in range(1, 6):
+                mind.feel("烦躁", 0.5, "9", "又刷屏", minute * 60.0)
+            [(kind, intensity, target, cause)] = mind.active_emotions(300.0)
+            self.assertEqual((kind, target, cause), ("烦躁", "9", "又刷屏"))
+            self.assertAlmostEqual(intensity, 0.5)
+            self.assertAlmostEqual(mind.mood(300.0)[0], once, places=2)
+            mind.feel("烦躁", 0.9, "9", "骂人", 360.0)
+            self.assertLess(mind.mood(360.0)[0], once)
+            mind.feel("烦躁", 0.5, "8", "也刷屏", 360.0)
+            self.assertEqual(len(mind.active_emotions(360.0)), 2)
+
+    def test_speaking_again_keeps_the_fade_so_far(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "innerlife.db")
+            mind = Mind(store, make_settings())
+            store.save_person("9", "九", -60.0, "", 1.0)
+            later = 1.0 + T.affinity_fade_days * 86400
+            mind.touch("9", "九", later)
+            self.assertAlmostEqual(mind.affinity("9", later), -30.0)
+            self.assertAlmostEqual(mind.affinity("9", later + 60), -30.0, places=1)
+
     def test_state_text_hides_private_memories_and_offers_venting_to_friends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")

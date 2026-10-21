@@ -158,10 +158,10 @@
         "default": "问的人有点多 等会儿再来"
       },
       "model_error_message": {
-        "description": "模型出错或没回出内容时的提示",
+        "description": "模型出错时的提示",
         "type": "string",
         "default": "模型那边抽风了 等会儿再问吧",
-        "hint": "模型返回错误、回复整理后为空，以及 AstrBot 人格的出错提示，都用这一句。"
+        "hint": "模型返回错误，以及 AstrBot 人格的出错提示，都用这一句。回复整理后为空（只写了内部标记、只有标点）时她不说话，不发这一句。"
       },
       "forget_done_message": {
         "description": "执行「忘掉我」后的回复",

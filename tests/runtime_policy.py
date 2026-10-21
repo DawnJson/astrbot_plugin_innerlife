@@ -616,10 +616,14 @@ async def test_response_finalize_and_slot_release() -> None:
     assert "other.test" not in response.completion_text
     assert not event.get_extra(main_module._SLOT_HELD_KEY)
 
-    # An empty reply and a model error read the same to the group.
-    empty = LLMResponse(role="assistant", completion_text=" 。 ")
-    await instance.secure_model_response(FakeEvent(), empty)
-    assert empty.completion_text == "模型那边抽风了 等会儿再问吧"
+    # Nothing to say (only the marker, or only punctuation) is silence, not the error text
+    # that asks the member to say it again; a model error still sends the error text.
+    for text in (" 。 ", '<il>{"e":[{"k":"无语","i":0.5}]}</il>'):
+        quiet = FakeEvent(sender_id="quiet")
+        empty = LLMResponse(role="assistant", completion_text=text)
+        await instance.secure_model_response(quiet, empty)
+        assert empty.completion_text == "" and quiet.sent == []
+        assert instance._recent_at_answers((GROUP_ID, "quiet")) == []
     failed = LLMResponse(role="err", completion_text="boom")
     await instance.secure_model_response(FakeEvent(), failed)
     assert failed.completion_text == "模型那边抽风了 等会儿再问吧"
@@ -868,8 +872,8 @@ async def test_work_material_in_the_at_path() -> None:
         # A member who keeps @-ing her: from the 4th answer on the prompt lets her answer short or not at all.
         poke = stateful(directory + "/poke", roll=1.0, cooldown_seconds=0)
         for number in range(main_module.AT_REPEAT_COUNT + 1):
-            event = FakeEvent("戳", sender_id="u1")
-            request = ProviderRequest(prompt="戳")
+            event = FakeEvent(f"戳{number}", sender_id="u1")
+            request = ProviderRequest(prompt=f"戳{number}")
             await poke.guard_waiting_request(event)
             await poke.secure_model_request(event, request)
             await poke.apply_persona(event, request)
@@ -889,6 +893,17 @@ async def test_work_material_in_the_at_path() -> None:
         await poke.secure_model_response(passing, response)
         assert response.completion_text == "" and passing.sent == []
         assert len(poke._recent_at_answers((GROUP_ID, "u1"))) == main_module.AT_REPEAT_COUNT + 1
+
+        # The same words @-ed again right away get no answer at all; other words still do.
+        again = FakeEvent("在吗", sender_id="u3")
+        await poke.guard_waiting_request(again)
+        assert not again.stopped
+        copy = FakeEvent("在吗", sender_id="u3")
+        await poke.guard_waiting_request(copy)
+        assert copy.stopped and copy.sent == []
+        different = FakeEvent("在不在", sender_id="u3")
+        await poke.guard_waiting_request(different)
+        assert not different.stopped
 
 
 class FakeGate:

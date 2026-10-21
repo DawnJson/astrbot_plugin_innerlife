@@ -54,6 +54,7 @@ class Marker:
     news: tuple[int, ...] = ()
     keep: tuple[KeepNote, ...] = ()
     sticker: int | None = None
+    reply_to: int | None = None  # the number of the chat line her chatter line answers
 
 
 def _text(value: object, limit: int) -> str:
@@ -116,6 +117,7 @@ def parse_marker(text: str) -> tuple[str, Marker]:
         return visible, Marker()
     news = data.get("news")
     sticker = data.get("s")
+    reply_to = data.get("r")
     return visible, Marker(
         emotions=tuple(
             note for item in _items(data.get("e"), MAX_EMOTIONS) if (note := _emotion(item))
@@ -135,6 +137,7 @@ def parse_marker(text: str) -> tuple[str, Marker]:
             note for item in _items(data.get("keep"), MAX_KEEP) if (note := _keep(item))
         ),
         sticker=sticker if isinstance(sticker, int) and not isinstance(sticker, bool) else None,
+        reply_to=reply_to if isinstance(reply_to, int) and not isinstance(reply_to, bool) else None,
     )
 
 
@@ -143,14 +146,26 @@ def strip_marker(text: str) -> str:
 
 
 def marker_rules(
-    *, emotion: bool, memory: bool, draw: bool, news: bool = False, keep: bool = False, stickers: str = ""
+    *,
+    emotion: bool,
+    memory: bool,
+    draw: bool,
+    news: bool = False,
+    keep: bool = False,
+    stickers: str = "",
+    reply_to: bool = False,
 ) -> str:
     """Prompt text teaching the hidden marker; empty when nothing would be read from it."""
     fields = []
+    if reply_to:
+        fields.append("r：你这句话回的是聊天记录里哪一条，写它的编号；不是回某一条就不写。")
     if emotion:
         fields.append(
             "e：你因这条消息产生的明显情绪，每项 {\"k\":情绪,\"i\":强度0到1,\"to\":对象昵称(可省),\"why\":原因20字内}。"
-            f"k 只能从这些里选：{'、'.join(KINDS)}。平淡就不写。有人问你工作上的事、追问或报问题都不算冒犯，不要因此记负面情绪。"
+            f"k 只能从这些里选：{'、'.join(KINDS)}。平淡就不写，大多数消息都不值得写；刚记过的同一种情绪不用再记。"
+            "有人问你工作上的事、追问或报问题都不算冒犯，不要因此记负面情绪。"
+            "被叫外号、被调侃、开玩笑、起哄、玩梗、斗图、复读、发表情包也不算冒犯，最多有点无语，不记烦躁和生气；"
+            "只有真的辱骂你、骚扰你才记烦躁或生气。别人之间的话没冲你来，to 不写他们。"
         )
     if emotion or memory:
         part = "p：对说话人的记录，每项 {\"n\":昵称"
@@ -166,7 +181,10 @@ def marker_rules(
                 ",\"m\":[{\"t\":此人亲口说的关于他自己的事，用你的话概括40字内，不要原话,"
                 "\"x\":1表示私人性质(分手、生病、家事、情绪低谷)}]"
             )
-        fields.append(part + "}。只记本人说自己的事，转述别人的不记。")
+        fields.append(
+            part + "}。只记本人明确说了自己的事，转述别人的不记；不从一句话推测（比如猜别人生病、抑郁、缺钱），"
+            "玩笑、梗和反话不当真记。"
+        )
     if draw:
         fields.append(
             "draw：你这条回复里答应了画、或者自己真想画一张图发出来时（比如日程上正好在画画、聊到想让人看看的东西），"

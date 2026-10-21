@@ -19,6 +19,7 @@ from .store import Store
 
 MAX_EMOTIONS_IN_PROMPT = 4
 MIN_FELT = 0.1
+EMOTION_MERGE_MINUTES = 30  # the same feeling about the same person again within this is one feeling
 NEGATIVE = -0.2
 INSULT_PENALTY = 12.0  # affinity lost when someone insults her to her face; scaled by temper_flare
 PROMPT_PEOPLE = 4  # people whose memories go into one reply's prompt
@@ -68,10 +69,30 @@ class Mind:
         now: float,
         held: float = 1.0,
     ) -> None:
+        """Feel something. The same feeling about the same person within EMOTION_MERGE_MINUTES
+        is that feeling going on, not a new one: it is renewed when stronger and moves the mood
+        only by what it grew, so a run of messages doesn't stack into a foul mood."""
         if KINDS[kind][0] < 0 and target:
             intensity = min(1.0, intensity * self.s.temperament.temper_flare)
-        self.store.add_emotion(kind, target, intensity, cause, now, held)
-        self._push(kind, intensity, now)
+        same = self.store.latest_emotion(kind, target, now - EMOTION_MERGE_MINUTES * 60)
+        if same is None:
+            self.store.add_emotion(kind, target, intensity, cause, now, held)
+            self._push(kind, intensity, now)
+            return
+        current = emotion.decayed_intensity(
+            same["intensity"],
+            now - same["created_at"],
+            self.s.temperament,
+            grudge=KINDS[kind][0] < 0 and target is not None,
+            held=same["held"],
+        )
+        if intensity <= current and held <= same["held"]:
+            return
+        self.store.renew_emotion(
+            same["id"], max(intensity, current), cause, now, max(held, same["held"])
+        )
+        if intensity > current:
+            self._push(kind, intensity - current, now)
 
     def active_emotions(self, now: float) -> list[tuple[str, float, str | None, str]]:
         """(kind, current intensity, target user id, cause), strongest first."""
@@ -96,6 +117,13 @@ class Mind:
             return 0.0
         idle = now - row["last_interaction"] if row["last_interaction"] else 0.0
         return emotion.faded_affinity(row["affinity"], idle, self.s.temperament)
+
+    def touch(self, user_id: str, name: str, now: float) -> None:
+        """Someone spoke in the group. The fade so far is written down first: it runs from
+        `last_interaction`, which this moves to now."""
+        row = self.store.person(user_id)
+        faded = self.affinity(user_id, now) if row is not None and row["affinity"] else None
+        self.store.touch_person(user_id, name, now, affinity=faded)
 
     def _treat(self, user_id: str, name: str, sentiment: float, impression: str, now: float) -> None:
         row = self.store.person(user_id)
@@ -180,6 +208,7 @@ class Mind:
         lines.append(
             "你可以自然地把心情说出来（比如“别惹我 今天被气死了”），被问起时讲讲原因。"
             "但情绪只改变口气：回答的内容、准确度和完整度不变，答疑照样给全。"
+            "有人问你对他好感多少、印象如何，照你对在场的人的感觉用自己的话说（没写到的人就是一般），不报数字。"
         )
         angry_at = {target for kind, intensity, target, _ in felt if KINDS[kind][0] < 0 and target}
         upset = valence <= NEGATIVE or any(

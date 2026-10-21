@@ -10,6 +10,9 @@ from . import talk
 
 MAX_BUFFERED_MESSAGES = 30
 PROMPT_MESSAGES = 15
+OWN_LINES_KEPT = 20  # her latest lines, read for the phrases she keeps repeating
+OVERUSED_LINES = 4  # a phrase in this many of them is a habit she should break
+OVERUSED_SHOWN = 6
 TRANSCRIPT_WINDOW_SECONDS = 15 * 60
 ASSIST_WINDOW_SECONDS = 5 * 60  # other members' questions an @ answer also covers
 MAX_MESSAGE_CHARS = 300
@@ -26,6 +29,9 @@ PASS_MARKER = "PASS"
 # Her mood: each line she sends spends a random amount of energy, which then recovers
 # with a time constant (see talk.recovered_energy).
 ENERGY_COST_RANGE = (10.0, 35.0)
+# An answer to someone who asked her costs this share of a line she says unprompted: a busy
+# hour of @ questions would otherwise leave her too tired for any small talk.
+ANSWER_ENERGY_SHARE = 0.3
 MOOD_JITTER = 10.0
 MOODS = (
     (30.0, "有点累，懒得说话：闲聊就算能接也多半不想接，除非有人直接喊你或接你刚说的话；工作上的事照样答"),
@@ -42,6 +48,52 @@ CHATTER_PROMPT = """现在没有人 @ 你，你在群里潜水。用户消息第
 
 def _one_line(text: str, limit: int) -> str:
     return " ".join(text.split())[:limit]
+
+
+def _plain(text: str) -> str:
+    """Letters, digits and CJK only: what a phrase is made of."""
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+PHRASE_LENGTHS = range(2, 7)  # "没完了是吧" is one habit, not two overlapping 4-grams
+
+
+def _joined(first: str, second: str) -> str | None:
+    """`first` and `second` overlapping by two or more characters, as one phrase."""
+    for a, b in ((first, second), (second, first)):
+        for overlap in range(min(len(a), len(b)) - 1, 1, -1):
+            if a.endswith(b[:overlap]):
+                return a + b[overlap:]
+    return None
+
+
+def overused_phrases(lines: list[str]) -> list[str]:
+    """Phrases of 2 to 6 characters, not only letters and digits (ids, numbers), that turn up
+    in OVERUSED_LINES or more of `lines`, most used first. A phrase inside one already kept
+    that turns up as often is left out; overlapping ones as often are joined, so a repeated
+    sentence shows up once instead of as every window along it."""
+    counts: dict[str, int] = {}
+    for line in lines:
+        plain = _plain(line)
+        for gram in {plain[i : i + n] for n in PHRASE_LENGTHS for i in range(len(plain) - n + 1)}:
+            if not gram.isascii():
+                counts[gram] = counts.get(gram, 0) + 1
+    found = sorted(
+        (gram for gram, count in counts.items() if count >= OVERUSED_LINES),
+        key=lambda gram: (-counts[gram], -len(gram)),
+    )
+    kept: list[tuple[str, int]] = []
+    for gram in found:  # longer before shorter at the same count, so a sub-phrase sees its whole
+        count = counts[gram]
+        if any(gram in phrase and seen >= count for phrase, seen in kept):
+            continue
+        for index, (phrase, seen) in enumerate(kept):
+            if seen == count and (joined := _joined(phrase, gram)):
+                kept[index] = (joined, seen)
+                break
+        else:
+            kept.append((gram, count))
+    return [phrase for phrase, _ in kept[:OVERUSED_SHOWN]]
 
 
 def parse_reply(answer: str, *, work: bool = False) -> str | None:
@@ -91,6 +143,7 @@ class ProactiveChat:
         self._stamina_minutes = stamina_minutes
         self.energy = random.uniform(30.0, 90.0)  # replaced by the saved value when there is one
         self._energy_at: float | None = None
+        self._mine: deque[str] = deque(maxlen=OWN_LINES_KEPT)  # her latest lines, all groups
 
     def _state(self, group_id: str) -> _GroupState:
         return self._groups.setdefault(group_id, _GroupState())
@@ -143,16 +196,23 @@ class ProactiveChat:
         return next(text for limit, text in MOODS if felt < limit)
 
     def record_reply(
-        self, group_id: str, text: str, now: float, *, spend: bool = True
+        self, group_id: str, text: str, now: float, *, spend: float = 1.0, mine: bool = True
     ) -> ChatMessage:
-        """Log her own line; speaking, @ answers included, spends energy unless `spend` is off."""
+        """Log a line from her account; it spends `spend` times a line's energy cost (0 for
+        none). `mine` is off for what she didn't word herself (plugin notices, sticker notes)."""
         state = self._state(group_id)
         self._recover(now)
         if spend:
-            self.energy = max(0.0, self.energy - random.uniform(*ENERGY_COST_RANGE))
+            self.energy = max(0.0, self.energy - spend * random.uniform(*ENERGY_COST_RANGE))
         entry = ChatMessage(now, SELF_SPEAKER, _one_line(text, MAX_MESSAGE_CHARS))
         state.messages.append(entry)
+        if mine:
+            self._mine.append(entry.text)
         return entry
+
+    def overused(self) -> list[str]:
+        """The phrases her latest lines keep repeating."""
+        return overused_phrases(list(self._mine))
 
     def last_message(self, group_id: str) -> ChatMessage | None:
         messages = self._state(group_id).messages

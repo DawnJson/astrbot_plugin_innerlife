@@ -122,12 +122,18 @@ def is_high_risk_security_request(text: object) -> bool:
     )
 
 
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+
+
 def normalize_reply_style(text: str) -> str:
+    """Chat-style text: no trailing full stops, no inline code or bold marks (QQ shows them raw)."""
     normalized = (
         text.replace("\r\n", "\n")
         .replace("\r", "\n")
         .replace("\ufe0f", "")
     )
+    normalized = _BOLD_RE.sub(r"\1", _INLINE_CODE_RE.sub(r"\1", normalized))
     lines = [
         re.sub(r"[ \t]+", " ", line).strip().rstrip("。.")
         for line in normalized.split("\n")

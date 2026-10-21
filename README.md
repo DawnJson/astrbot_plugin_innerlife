@@ -172,7 +172,7 @@ git clone https://github.com/DawnJson/astrbot_plugin_innerlife.git
 
 **群里收到"模型那边抽风了 等会儿再问吧"是怎么回事？**
 
-这是 `messages.model_error_message` 的默认文字：模型返回错误、或回复整理后为空时，@ 回答改发这一句。具体原因看 AstrBot 日志。
+这是 `messages.model_error_message` 的默认文字：模型返回错误时，@ 回答改发这一句。具体原因看 AstrBot 日志。回复整理后为空（只写了内部标记、只有标点）时她不说话，不发这一句：这句话会请对方重发，刷屏的人正好照做。
 
 **`basic.error_reply_prefixes` 填什么？**
 

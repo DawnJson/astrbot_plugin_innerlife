@@ -172,12 +172,15 @@ class Store:
             (user_id, name, affinity, impression, now, now),
         )
 
-    def touch_person(self, user_id: str, name: str, now: float) -> None:
+    def touch_person(
+        self, user_id: str, name: str, now: float, *, affinity: float | None = None
+    ) -> None:
+        """They spoke; `affinity` (when given) replaces the stored one, see Mind.touch."""
         self._run(
             "INSERT INTO people (user_id,name,last_interaction,updated_at) VALUES (?,?,?,?)"
             " ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,"
-            " last_interaction=excluded.last_interaction",
-            (user_id, name, now, now),
+            " last_interaction=excluded.last_interaction, affinity=COALESCE(?, affinity)",
+            (user_id, name, now, now, affinity),
         )
 
     def all_people(self) -> list[sqlite3.Row]:
@@ -296,6 +299,23 @@ class Store:
             "INSERT INTO emotions (kind,target_user_id,intensity,cause,created_at,held)"
             " VALUES (?,?,?,?,?,?)",
             (kind, target_user_id, intensity, cause, now, held),
+        )
+
+    def latest_emotion(
+        self, kind: str, target_user_id: str | None, since: float
+    ) -> sqlite3.Row | None:
+        return self._one(
+            "SELECT * FROM emotions WHERE kind=? AND target_user_id IS ? AND created_at>=?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (kind, target_user_id, since),
+        )
+
+    def renew_emotion(
+        self, emotion_id: int, intensity: float, cause: str, now: float, held: float
+    ) -> None:
+        self._run(
+            "UPDATE emotions SET intensity=?, cause=?, created_at=?, held=? WHERE id=?",
+            (intensity, cause, now, held, emotion_id),
         )
 
     def emotions_since(self, since: float) -> list[sqlite3.Row]:
