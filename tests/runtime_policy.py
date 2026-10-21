@@ -822,11 +822,12 @@ async def test_work_material_in_the_at_path() -> None:
 
         # Nothing relevant: no material section at all, and she still has her job.
         instance.context = make_context(FakeSource(""))
+        bare_event = asking()
         bare = ProviderRequest(prompt="在吗")
-        await instance.secure_model_request(woken, bare)
-        await instance.apply_persona(woken, bare)
+        await instance.secure_model_request(bare_event, bare)
+        await instance.apply_persona(bare_event, bare)
         assert "【工作资料" not in bare.system_prompt and "你在这里做客服" in bare.system_prompt
-        instance._release_slot(woken)
+        instance._release_slot(bare_event)
 
         # No work_background: no job section.
         jobless = stateful(directory + "/jobless", roll=1.0)
@@ -904,6 +905,47 @@ async def test_work_material_in_the_at_path() -> None:
         different = FakeEvent("在不在", sender_id="u3")
         await poke.guard_waiting_request(different)
         assert not different.stopped
+
+        # After CROWD_AT_COUNT small-talk answers in the group, a small-talk @ is judged with
+        # the rest of the chat, told the crowd gets one line or none; work questions still
+        # get their own answer.
+        crowd = stateful(directory + "/crowd", roll=0.0, cooldown_seconds=0)
+        crowd_source = FakeSource("")
+        crowd.context = make_context(crowd_source)
+        judged: list[str] = []
+
+        def at_her(text: str, sender: str) -> FakeEvent:
+            return FakeEvent(
+                text, sender_id=sender, messages=[main_module.At(qq=BOT_ID), main_module.Plain(text)]
+            )
+
+        async def crowd_call(system_prompt: str, prompt: str, **_):
+            judged.append(prompt)
+            return "你们闹够没"
+
+        crowd._model_call = crowd_call
+        quiet_seconds, main_module.QUIET_SECONDS = main_module.QUIET_SECONDS, 0
+        try:
+            calm = at_her("哈哈哈", "u7")
+            await crowd.handle_group_chatter(calm)
+            await crowd.guard_waiting_request(calm)
+            assert not calm.stopped and judged == []
+            crowd._group_at_answers[GROUP_ID] = [time.monotonic()] * main_module.CROWD_AT_COUNT
+            teased = at_her("嘿嘿嘿", "u8")
+            await crowd.handle_group_chatter(teased)
+            await crowd.guard_waiting_request(teased)
+            assert teased.stopped
+            [prompt] = judged
+            assert "不会再单独回复" in prompt and "嘿嘿嘿" in prompt
+            assert [chain_texts(m) for m in teased.sent] == ["你们闹够没"]
+            crowd_source.block = "资料"
+            asked = at_her("这个怎么配置", "u9")
+            await crowd.handle_group_chatter(asked)
+            await crowd.guard_waiting_request(asked)
+            assert not asked.stopped and len(judged) == 1
+            assert asked.get_extra(main_module._MATERIAL_KEY)
+        finally:
+            main_module.QUIET_SECONDS = quiet_seconds
 
 
 class FakeGate:
@@ -1028,11 +1070,13 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
             TextPart(text="[Related Knowledge Base Results]:\n候选")
         ]
         await run_request(instance, support_event, support_request)
+        # Material may come with teasing that only shares a word with it: she keeps her real
+        # state and the length hint, and the work prompt tells her when to set them aside.
         assert support_event.get_extra(main_module._BURST_CAP_KEY) == 0
         assert "<sp>" not in support_request.system_prompt
-        assert "【这次说多长】" not in support_request.system_prompt
-        assert "你此刻的状态：在上班" in support_request.system_prompt
-        assert support_event.get_extra(main_module._BUDGET_KEY) is None
+        assert "你此刻的状态：兴致不错" in support_request.system_prompt
+        assert "【这次说多长】" in support_request.system_prompt
+        assert "在上班" not in support_request.system_prompt
         instance._release_slot(support_event)
 
         plain = stateful(
@@ -1854,7 +1898,7 @@ async def test_talk_gate() -> None:
         [logged] = work.store.talk_log()
         features = json.loads(logged["features"])
         assert logged["outcome"] == "PASS" and features["work"] is True
-        assert 0 < logged["p"] < 1.0 and main_module.WORK_MOOD not in prompts[0]
+        assert 0 < logged["p"] < 1.0 and "在上班" not in prompts[0]
         missed_source = FakeSource("门店资料：周一休息")
         missed, prompts = worker("missed", missed_source)
         missed._proactive_chat.record(GROUP_ID, "乙", "什么时候营业？", time.monotonic(), sender_id="2", pending=True)
