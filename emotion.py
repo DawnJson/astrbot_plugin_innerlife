@@ -26,6 +26,8 @@ AFFINITY_MAX = 100.0
 AFFINITY_FLOOR = -60.0
 AFFINITY_STEP = 4.0  # plain affinity change per sentiment point; temper_flare/temper_soften scale it
 AFFINITY_LIKE = 25.0  # "有好感"; also how fond she must be of someone to vent to them
+# "有点反感" and below; a stored impression of someone she dislikes stays out of her prompt
+AFFINITY_DISLIKE = -15.0
 EMOTION_HALF_LIFE_MINUTES = 90.0
 MOOD_BASELINE_AROUSAL = 0.3
 
@@ -114,7 +116,7 @@ def affinity_words(affinity: float) -> str:
         return "很喜欢"
     if affinity >= AFFINITY_LIKE:
         return "有好感"
-    if affinity > -15:
+    if affinity > AFFINITY_DISLIKE:
         return "一般"
     if affinity > -40:
         return "有点反感"

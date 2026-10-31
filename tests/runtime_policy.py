@@ -477,6 +477,22 @@ def test_quoted_text_is_part_of_the_request_text() -> None:
     print("PASS policy: quoted text is included in risk checks")
 
 
+def test_transcript_shows_whom_a_quote_answers() -> None:
+    """A quote-reply to someone else must not read as said to the room, or to her."""
+    def line(reply) -> str:
+        return main_module._event_chat_text(
+            FakeEvent("", messages=[reply, main_module.Plain("你怎么炸了")])
+        )
+
+    assert line(main_module.Reply(id="1", sender_id="2", sender_nickname="甲")) == "[回复甲] 你怎么炸了"
+    assert line(main_module.Reply(id="2", sender_id=BOT_ID)) == "[回复你] 你怎么炸了"
+    # A member nicknamed like her is still someone else.
+    assert line(main_module.Reply(id="3", sender_id="3", sender_nickname="你")) == "[回复群友] 你怎么炸了"
+    # A quote AstrBot could not fetch has no sender to show.
+    assert line(main_module.Reply(id="4")) == "你怎么炸了"
+    print("PASS policy: the chat transcript shows whom a quote-reply answers")
+
+
 async def test_request_policy_at_300_and_0() -> None:
     os.environ[SECRET_ENV] = SECRET
     instance = make_main(search_rules=True)
@@ -697,10 +713,12 @@ async def test_chatter_judgement() -> None:
     with tempfile.TemporaryDirectory() as directory:
         instance = stateful(directory + "/main", roll=0.0, search_rules=True)
         prompts: list[tuple[str, str]] = []
+        searched: list[bool] = []
         answers: list[str | None] = []
 
-        async def fake_call(system_prompt: str, prompt: str, **_):
+        async def fake_call(system_prompt: str, prompt: str, **kwargs):
             prompts.append((system_prompt, prompt))
+            searched.append(kwargs.get("search", False))
             return answers.pop(0)
 
         instance._model_call = fake_call
@@ -726,8 +744,8 @@ async def test_chatter_judgement() -> None:
         system_prompt, prompt = prompts[-1]
         assert system_prompt.startswith(instance.safety_prompt + "\n\n测试人设\n\n")
         assert "只输出下面两种之一" in system_prompt
-        # The background model answers without searching: no search rules, only on @ answers.
-        assert "【联网搜索】" not in system_prompt
+        # Small talk goes to the background model, which answers without searching.
+        assert "【联网搜索】" not in system_prompt and not searched[-1]
         assert prompt.startswith("你此刻的状态：") and "群友也会叫你：小测\n" in prompt
         assert prompt.endswith("1. 0分钟前 甲：今天好热")
 
@@ -736,6 +754,11 @@ async def test_chatter_judgement() -> None:
 
         event, entries = await judged("哈哈", ["第一句", "第二句"])
         assert event.sent_text() == ["哈哈"]
+
+        # A question goes to the chat model with the search rules: the background one would guess.
+        await judged("PASS", ["新出的那个模型叫什么？"])
+        assert "【联网搜索】" in prompts[-1][0] and searched[-1]
+        assert json.loads(instance.store.talk_log()[-1]["features"])["search"] is True
 
         quiet = stateful(directory + "/quiet", roll=0.0, bot_names=[])
         quiet_prompts: list[str] = []
@@ -1046,9 +1069,10 @@ async def test_state_block_and_burst_rules_in_the_request() -> None:
         request = ProviderRequest(prompt="你好")
         await run_request(instance, event, request)
         prompt = request.system_prompt
-        for wanted in ("很会聊天", "在准备考研", "总抬杠", "多云 29°C", "09:00 赖床", "<il>", "<sp>", "2 到 3 条"):
+        for wanted in ("很会聊天", "在准备考研", "路人乙：有点反感", "多云 29°C", "09:00 赖床", "<il>", "<sp>", "2 到 3 条"):
             assert wanted in prompt, wanted
-        assert "刚分手" not in prompt
+        # Someone she dislikes keeps how much, not the cross words she once wrote about him.
+        assert "刚分手" not in prompt and "总抬杠" not in prompt
         assert event.get_extra(main_module._BURST_CAP_KEY) == 3
         # A casual @ answer gets the same state line and length hint as unmentioned chat.
         assert "你此刻的状态：兴致不错" in prompt and "【这次说多长】" in prompt
@@ -1254,7 +1278,7 @@ async def test_judge_sees_images_and_bursts() -> None:
             instance = stateful(directory + f"/{vision}", roll=0.0, max_images=2, vision=vision)
             seen: dict = {}
 
-            async def fake_call(system_prompt: str, prompt: str, image_urls=None):
+            async def fake_call(system_prompt: str, prompt: str, image_urls=None, **_):
                 seen.update(
                     system=system_prompt,
                     prompt=prompt,
@@ -1303,7 +1327,7 @@ async def test_stickers_are_kept_and_sent() -> None:
         seen: list[tuple[str, str]] = []
         answers: list[str] = []
 
-        async def fake_call(system_prompt: str, prompt: str, image_urls=None):
+        async def fake_call(system_prompt: str, prompt: str, image_urls=None, **_):
             seen.append((system_prompt, prompt))
             return answers.pop(0)
 
@@ -1977,6 +2001,7 @@ async def main() -> None:
     await test_cooldown()
     await test_waiting_guard()
     test_quoted_text_is_part_of_the_request_text()
+    test_transcript_shows_whom_a_quote_answers()
     await test_request_policy_at_300_and_0()
     await test_request_limits()
     await test_response_finalize_and_slot_release()

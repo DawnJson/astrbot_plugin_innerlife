@@ -206,8 +206,8 @@ class Mind:
                 )
             lines.append("此刻的情绪：" + "；".join(parts) + "。")
         lines.append(
-            "你可以自然地把心情说出来（比如“别惹我 今天被气死了”），被问起时讲讲原因。"
-            "但情绪只改变口气：回答的内容、准确度和完整度不变，答疑照样给全。"
+            "你可以自然地把心情说出来（比如“别惹我 今天被气死了”），被问起时讲讲原因，但别拿没惹你的人撒气。"
+            "情绪只改变口气：回答的内容、准确度和完整度不变，答疑照样给全。"
             "有人问你对他好感多少、印象如何，照你对在场的人的感觉用自己的话说（没写到的人就是一般），不报数字。"
         )
         angry_at = {target for kind, intensity, target, _ in felt if KINDS[kind][0] < 0 and target}
@@ -252,7 +252,9 @@ class Mind:
             if not kept and not impression and abs(affinity) < 15:
                 continue
             line = f"- {name}：{emotion.affinity_words(affinity)}"
-            if impression:
+            # An impression written while she was cross ("嘴臭的小丑"), read back on each of their
+            # lines, turns dislike into contempt; how much she likes them is enough to go by.
+            if impression and affinity > emotion.AFFINITY_DISLIKE:
                 line += f"，印象：{impression}"
             if kept:
                 line += "；记得：" + "；".join(kept)
@@ -262,7 +264,8 @@ class Mind:
         return (
             "你对在场的人：\n" + "\n".join(lines)
             + "\n记忆要像真人那样自然提起，不要背诵；没把握的细节不要说。"
-            "人对你的态度也会影响你对他的口气：喜欢的人软一点，反感的人冷一点。"
+            "人对你的态度也会影响你对他的口气：喜欢的人软一点；反感的人话少一点、淡一点，"
+            "但照样正常说话，不嘲讽、不翻旧账、不骂。"
         )
 
     def life_text(self, day: datetime.datetime) -> str:

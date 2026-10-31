@@ -473,7 +473,7 @@ class MindTests(unittest.TestCase):
             self.assertAlmostEqual(mind.affinity("9", later), -30.0)
             self.assertAlmostEqual(mind.affinity("9", later + 60), -30.0, places=1)
 
-    def test_state_text_hides_private_memories_and_offers_venting_to_friends(self) -> None:
+    def test_state_text_hides_private_memories_and_grudges_and_offers_venting_to_friends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "innerlife.db")
             mind = Mind(store, make_settings())
@@ -490,7 +490,10 @@ class MindTests(unittest.TestCase):
             people = mind.people_text([("1", "甲"), ("2", "乙")], now)
             self.assertIn("在准备考研", people)
             self.assertNotIn("分手", people)
-            self.assertIn("总抬杠", people)
+            self.assertIn("很会聊天", people)
+            # Someone she dislikes keeps how much, not the cross words she once wrote about him.
+            self.assertIn("乙：很反感", people)
+            self.assertNotIn("总抬杠", people)
 
     def test_forgotten_memories_leave_the_prompt_and_the_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
