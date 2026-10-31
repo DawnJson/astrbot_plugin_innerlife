@@ -55,7 +55,7 @@ class GateTests(unittest.TestCase):
         self.assertGreater(logit(TalkState(heat=1.0)), logit(TalkState(heat=0.0)))
 
     def test_question_words_count_without_a_question_mark(self) -> None:
-        for text in ("怎么配置", "是什么原因", "能不能用", "好用吗", "为啥报错", "有没有人", "哪个版本", "对吧？", "ok?"):
+        for text in ("怎么配置", "是什么原因", "能不能用", "好用吗", "为啥报错", "有没有人", "哪个版本", "对吧？", "ok?", "最贵的多少钱"):
             self.assertTrue(talk.is_question(text), text)
         for text in ("今天好热", "哈哈哈", "我去吃饭了"):
             self.assertFalse(talk.is_question(text), text)
