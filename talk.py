@@ -30,6 +30,13 @@ COUNT_WEIGHT = 0.5
 WORK_WEIGHT = 4.0  # the batch's questions got work material
 ASLEEP_WEIGHT = -2.0
 
+# Whether she feels like answering a small-talk @: someone neutral at full energy in a level
+# mood gets an answer about 9 times in 10, someone she dislikes about half the time, fewer
+# when she is tired or upset. A work question is answered regardless (the prompt says so).
+AT_BASE = 2.0
+AT_AFFINITY_WEIGHT = 3.0
+AT_VALENCE_WEIGHT = 1.0
+
 TOPIC_RATE = 0.0127  # per minute at full urge and full energy
 TOPIC_SENT_URGE = 0.3
 TOPIC_MISS_URGE = 0.6
@@ -124,6 +131,16 @@ def chat_logit(
 def probability(z: float, temperature: float) -> float:
     x = -z / temperature
     return 0.0 if x > 700 else 1.0 / (1.0 + math.exp(x))
+
+
+def at_logit(*, affinity: float, valence: float, energy: float) -> float:
+    """The log-odds she feels like answering a small-talk @; `affinity` is 0-100, `valence` -1..1."""
+    return (
+        AT_BASE
+        + AT_AFFINITY_WEIGHT * min(AFFINITY_RANGE[1], max(AFFINITY_RANGE[0], affinity / 100.0))
+        + AT_VALENCE_WEIGHT * valence
+        + math.log(breadth(energy))
+    )
 
 
 def topic_probability(urge: float, energy: float) -> float:

@@ -60,6 +60,16 @@ class GateTests(unittest.TestCase):
         for text in ("今天好热", "哈哈哈", "我去吃饭了"):
             self.assertFalse(talk.is_question(text), text)
 
+    def test_small_talk_at_odds_follow_affinity_mood_and_energy(self) -> None:
+        def p(**k) -> float:
+            return talk.probability(talk.at_logit(**{"affinity": 0.0, "valence": 0.0, "energy": 100.0, **k}), 1.0)
+
+        self.assertGreater(p(), 0.85)  # someone neutral, rested, level mood: nearly always
+        self.assertGreater(p(affinity=60.0), p())
+        self.assertTrue(0.35 < p(affinity=-50.0) < 0.65)  # someone she dislikes: a coin toss
+        self.assertLess(p(energy=10.0), p())
+        self.assertLess(p(valence=-0.8), p())
+
 
 class ShareTests(unittest.TestCase):
     def test_share_below_target_raises_the_bias_and_above_lowers_it(self) -> None:

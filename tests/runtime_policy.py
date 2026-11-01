@@ -911,12 +911,31 @@ async def test_work_material_in_the_at_path() -> None:
         assert "一直在 @ 你" not in other_request.system_prompt
         poke._release_slot(other)
 
+        # Whether she feels like answering small talk is rolled; a missed roll tells her to let it go.
+        assert main_module.AT_UNWILLING_PROMPT in other_request.system_prompt
+        keen = stateful(directory + "/keen", roll=0.0, cooldown_seconds=0)
+        keen_event = FakeEvent("戳", sender_id="u1")
+        keen_request = ProviderRequest(prompt="戳")
+        await keen.guard_waiting_request(keen_event)
+        await keen.secure_model_request(keen_event, keen_request)
+        await keen.apply_persona(keen_event, keen_request)
+        assert main_module.AT_CHOICE_PROMPT in keen_request.system_prompt
+        assert main_module.AT_UNWILLING_PROMPT not in keen_request.system_prompt
+        keen._release_slot(keen_event)
+
         # A reply that is exactly PASS sends nothing, no error text, and does not count as an answer.
-        passing = FakeEvent("戳", sender_id="u1")
+        passing = FakeEvent("戳", sender_id="u4")
+        passing_request = ProviderRequest(prompt="戳")
+        await poke.guard_waiting_request(passing)
+        await poke.secure_model_request(passing, passing_request)
+        await poke.apply_persona(passing, passing_request)
         response = LLMResponse(role="assistant", completion_text="PASS")
         await poke.secure_model_response(passing, response)
         assert response.completion_text == "" and passing.sent == []
-        assert len(poke._recent_at_answers((GROUP_ID, "u1"))) == main_module.AT_REPEAT_COUNT + 1
+        assert poke._recent_at_answers((GROUP_ID, "u4")) == []
+        passed_row = poke.store.talk_log()[-1]
+        assert (passed_row["kind"], passed_row["outcome"]) == ("at", "PASS") and 0 < passed_row["p"] < 1
+        assert json.loads(passed_row["features"])["willing"] is False
 
         # The same words @-ed again right away get no answer at all; other words still do.
         again = FakeEvent("在吗", sender_id="u3")
