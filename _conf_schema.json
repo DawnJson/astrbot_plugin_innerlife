@@ -142,7 +142,7 @@
         "hint": "{max_images} 会替换为图片数上限。"
       },
       "empty_mention_message": {
-        "description": "只 @ 她但没有内容的提示",
+        "description": "只 @ 她、没有文字也没有图时的提示（引用的消息也算内容）",
         "type": "string",
         "default": "@我 倒是说点啥啊"
       },

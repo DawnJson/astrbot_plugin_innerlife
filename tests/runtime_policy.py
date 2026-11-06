@@ -139,6 +139,9 @@ class FakeEvent:
     def get_result(self):
         return self.result
 
+    def clear_result(self) -> None:
+        self.result = None
+
     async def send(self, message) -> None:
         self.sent.append(message)
 
@@ -447,6 +450,18 @@ async def test_waiting_guard() -> None:
     empty = FakeEvent("  ")
     await instance.guard_waiting_request(empty)
     assert empty.stopped and empty.sent_text() == ["@我 倒是说点啥啊"]
+
+    # A quote with a bare @ is about the quoted message, not an empty mention.
+    quote_only = FakeEvent(
+        "",
+        messages=[
+            main_module.Reply(id="9", chain=[main_module.Plain("这个价格是不是太低了")]),
+            main_module.At(qq=BOT_ID),
+        ],
+        sender_id="quote-user",
+    )
+    await instance.guard_waiting_request(quote_only)
+    assert not quote_only.stopped and quote_only.sent == []
 
     leaky = FakeEvent(f"这是什么 password={SECRET}")
     await instance.guard_waiting_request(leaky)
@@ -933,6 +948,10 @@ async def test_work_material_in_the_at_path() -> None:
         await poke.secure_model_response(passing, response)
         assert response.completion_text == "" and passing.sent == []
         assert poke._recent_at_answers((GROUP_ID, "u4")) == []
+        # AstrBot still hands the decorating stage the blank text: nothing goes out.
+        passing.set_result(model_result(response.completion_text))
+        await poke.secure_decorated_result(passing)
+        assert passing.get_result() is None
         passed_row = poke.store.talk_log()[-1]
         assert (passed_row["kind"], passed_row["outcome"]) == ("at", "PASS") and 0 < passed_row["p"] < 1
         assert json.loads(passed_row["features"])["willing"] is False

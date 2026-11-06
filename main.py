@@ -1315,7 +1315,8 @@ class Main(star.Star):
             await event.send(MessageChain().message(self._image_limit_message()))
             event.stop_event()
             return
-        if not event.message_str.strip() and image_count == 0:
+        # A quote with a bare @ asks about the quoted message: that is something to answer.
+        if not request_text.strip() and image_count == 0:
             await event.send(MessageChain().message(self.s.empty_mention_message))
             event.stop_event()
             return
@@ -1643,7 +1644,13 @@ class Main(star.Star):
                     for part in plan_burst(combined, event.get_extra(_BURST_CAP_KEY, 0))
                     if (message := finalize_reply(part, self.secrets, self.s.allowed_link_domains))
                 ]
-                plain_components[0].text = messages[0] if messages else self.s.model_error_message
+                if not messages:
+                    # Nothing left to say (a PASS, or a sticker on its own): she stays quiet.
+                    # The blank text AstrBot still carries would go out as the error text,
+                    # asking the member to say it again.
+                    event.clear_result()
+                    return
+                plain_components[0].text = messages[0]
                 for component in plain_components[1:]:
                     result.chain.remove(component)
                 event.set_extra(_BURST_REST_KEY, messages[1:])
