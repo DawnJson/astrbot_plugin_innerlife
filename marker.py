@@ -12,9 +12,11 @@ MAX_MEMORIES = 3
 MAX_NEWS = 2
 MAX_KEEP = 2
 
-_CLOSED_RE = re.compile(r"<il>(.*?)</il>", re.DOTALL | re.IGNORECASE)
-_OPEN_RE = re.compile(r"<il>(.*)$", re.DOTALL | re.IGNORECASE)
-_STRAY_RE = re.compile(r"</?il>|<i(?:l)?$", re.IGNORECASE)
+_CLOSED_RE = re.compile(r"<\s*il\s*>(.*?)<\s*/\s*il\s*>", re.DOTALL | re.IGNORECASE)
+_OPEN_RE = re.compile(r"<\s*il\s*>(.*)$", re.DOTALL | re.IGNORECASE)
+_STRAY_RE = re.compile(r"<\s*/?\s*il\s*>|<i(?:l)?$", re.IGNORECASE)
+_BARE_STICKER_RE = re.compile(r"<\s*s\s*[:：]?\s*(\d+)\s*>|s\s*[:：]\s*(\d+)")
+_FIELDS = frozenset({"e", "p", "draw", "news", "keep", "s", "r"})
 FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 
@@ -102,13 +104,33 @@ def _keep(item: dict) -> KeepNote | None:
     return KeepNote(image, description)
 
 
+def _bare_marker(text: str) -> tuple[str, str]:
+    """A marker written without its tag as the last line: a JSON object of marker fields only, or a
+    sticker as `s: 3` / `<s3>`. Any other last line is text."""
+    head, _, last = text.strip().rpartition("\n")
+    last = last.strip()
+    sticker = _BARE_STICKER_RE.fullmatch(last)
+    if sticker:
+        return head, json.dumps({"s": int(sticker.group(1) or sticker.group(2))})
+    try:
+        data = json.loads(last) if last.startswith("{") else None
+    except ValueError:
+        return text, ""
+    if isinstance(data, dict) and data and data.keys() <= _FIELDS:
+        return head, last
+    return text, ""
+
 
 def parse_marker(text: str) -> tuple[str, Marker]:
     """Split a model answer into the visible text and its hidden marker; garbage never raises or leaks."""
     closed = _CLOSED_RE.search(text)
     opened = None if closed else _OPEN_RE.search(text)
-    raw = (closed or opened).group(1) if (closed or opened) else ""
-    visible = _STRAY_RE.sub("", _OPEN_RE.sub("", _CLOSED_RE.sub("", text))).strip()
+    if closed or opened:
+        raw = (closed or opened).group(1)
+        visible = _STRAY_RE.sub("", _OPEN_RE.sub("", _CLOSED_RE.sub("", text))).strip()
+    else:
+        visible, raw = _bare_marker(text)
+        visible = _STRAY_RE.sub("", visible).strip()
     try:
         data = json.loads(FENCE_RE.sub("", raw.strip()))
     except ValueError:

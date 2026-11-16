@@ -134,6 +134,24 @@ class MarkerTests(unittest.TestCase):
                 self.assertNotIn("<il", text.lower())
                 self.assertEqual(parsed, marker.Marker())
 
+    def test_untagged_or_spaced_marker_is_read_not_sent(self) -> None:
+        cases = {
+            "走开啦\ns: 24": ("走开啦", marker.Marker(sticker=24)),
+            "懒得动\n<s28>": ("懒得动", marker.Marker(sticker=28)),
+            "s：3": ("", marker.Marker(sticker=3)),
+            '自己查\n{"r": 15}': ("自己查", marker.Marker(reply_to=15)),
+            '自己查\n<il >{"r": 15, "s": 2}': ("自己查", marker.Marker(sticker=2, reply_to=15)),
+            '好\n< il>{"s": 4}</ il>': ("好", marker.Marker(sticker=4)),
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(marker.parse_marker(raw), expected)
+
+    def test_a_json_line_that_is_not_a_marker_stays_text(self) -> None:
+        for raw in ('配置这样写\n{"model": "x", "s": 1}', "版本\ns1", '例子\n{"s": 1'):
+            with self.subTest(raw=raw):
+                self.assertEqual(marker.parse_marker(raw), (raw, marker.Marker()))
+
     def test_bad_fields_are_dropped_not_trusted(self) -> None:
         raw = (
             '<il>{"e":[{"k":"暴怒","i":5},{"k":"开心","i":9},"x",{"k":"开心","i":"高"}],'
